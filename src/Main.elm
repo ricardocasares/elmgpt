@@ -2,16 +2,21 @@ module Main exposing (Model, Msg, main)
 
 import Browser
 import Browser.Dom
-import Html exposing (Attribute, Html, a, aside, div, h1, header, main_, nav, p, span, text)
-import Html.Attributes exposing (attribute, class, disabled, href, name, placeholder, rel, target, type_, value)
+import Html exposing (Attribute, Html, a, aside, audio, div, h1, header, img, main_, nav, p, span, text)
+import Html.Attributes exposing (alt, attribute, class, controls, disabled, href, name, placeholder, rel, src, target, type_, value)
 import Html.Events exposing (onClick, onInput, preventDefaultOn)
-import InteropDefinitions as Interop exposing (AbortController, Message, Role(..), Theme)
+import File exposing (File)
+import File.Select
+import InteropDefinitions as Interop exposing (AbortController, Attachment, Message, Recorder, Role(..), Theme)
 import InteropPorts
 import Json.Decode as Decode
+import Markdown.Parser
+import Markdown.Renderer
 import Phosphor exposing (IconWeight(..))
 import Process
 import Task
 import UI.Alert as Alert
+import UI.Attachment as AttachmentView
 import UI.DropdownMenu as DropdownMenu
 import UI.Button as Button
 import UI.InputGroup as InputGroup
@@ -49,6 +54,8 @@ type alias Model =
     , status : Status
     , messages : List Message
     , draft : String
+    , attachments : List Attachment
+    , recording : Recording
     , request : Request
     , notice : Maybe String
     , copied : Maybe Int
@@ -80,6 +87,16 @@ type Status
     | Failed String
 
 
+{-| A voice message on its way into the composer. `Asking` waits for the microphone, and `Finishing`
+for the clip of a recorder that was stopped.
+-}
+type Recording
+    = NotRecording
+    | Asking
+    | Recording Recorder
+    | Finishing
+
+
 {-| The reply being produced, if any. `Starting` waits for the abort controller that the reply is
 requested with.
 -}
@@ -108,6 +125,8 @@ init flags =
       , status = Checking
       , messages = []
       , draft = ""
+      , attachments = []
+      , recording = NotRecording
       , request = Idle
       , notice = Nothing
       , copied = Nothing
@@ -135,7 +154,10 @@ isDark model =
 
 canSend : Model -> Bool
 canSend model =
-    model.status == Ready && not (isRunning model.request) && not (String.isEmpty (String.trim model.draft))
+    model.status == Ready
+        && not (isRunning model.request)
+        && (model.recording == NotRecording)
+        && not (String.isEmpty (String.trim model.draft) && List.isEmpty model.attachments)
 
 
 isRunning : Request -> Bool
@@ -156,6 +178,12 @@ type Msg
     = ThemeSelected Theme
     | DraftChanged String
     | SendClicked
+    | AttachClicked
+    | FilesSelected File (List File)
+    | FileRead Attachment
+    | AttachmentRemoved Int
+    | RecordClicked
+    | RecordStopClicked
     | SuggestionClicked String
     | NewChatClicked
     | RecentClicked Int
@@ -194,8 +222,9 @@ update msg model =
         SendClicked ->
             if canSend model then
                 ( { model
-                    | messages = model.messages ++ [ { role = User, content = String.trim model.draft } ]
+                    | messages = model.messages ++ [ { role = User, content = String.trim model.draft, attachments = model.attachments } ]
                     , draft = ""
+                    , attachments = []
                     , request = Starting
                     , notice = Nothing
                     , holding = True
@@ -208,6 +237,48 @@ update msg model =
 
             else
                 ( model, Cmd.none )
+
+        AttachClicked ->
+            ( model, File.Select.files [ "image/*", "audio/*" ] FilesSelected )
+
+        -- The picker only offers images and audio, but a drop of another kind of file can still get here.
+        FilesSelected file files ->
+            let
+                ( readable, others ) =
+                    List.partition (File.mime >> isReadable) (file :: files)
+            in
+            ( { model
+                | notice =
+                    if List.isEmpty others then
+                        model.notice
+
+                    else
+                        Just ("The model reads images and audio only, so these were left out: " ++ String.join ", " (List.map File.name others) ++ ".")
+              }
+            , Cmd.batch (List.map read readable)
+            )
+
+        FileRead attachment ->
+            ( { model | attachments = model.attachments ++ [ attachment ] }, Cmd.none )
+
+        AttachmentRemoved index ->
+            ( { model | attachments = List.take index model.attachments ++ List.drop (index + 1) model.attachments }, Cmd.none )
+
+        RecordClicked ->
+            if model.recording == NotRecording then
+                ( { model | recording = Asking }, InteropPorts.fromElm Interop.StartRecording )
+
+            else
+                ( model, Cmd.none )
+
+        -- The clip arrives as `Recorded` once the recorder has stopped.
+        RecordStopClicked ->
+            case model.recording of
+                Recording recorder ->
+                    ( { model | recording = Finishing }, InteropPorts.fromElm (Interop.StopRecording recorder) )
+
+                _ ->
+                    ( model, Cmd.none )
 
         SuggestionClicked suggestion ->
             update SendClicked { model | draft = suggestion }
@@ -387,6 +458,15 @@ fromInterop event model =
         Interop.StreamError message ->
             finish { text = Nothing, error = Just message } model
 
+        Interop.RecordingStarted recorder ->
+            ( { model | recording = Recording recorder }, Cmd.none )
+
+        Interop.Recorded attachment ->
+            ( { model | recording = NotRecording, attachments = model.attachments ++ [ attachment ] }, Cmd.none )
+
+        Interop.RecordingError message ->
+            ( { model | recording = NotRecording, notice = Just message }, Cmd.none )
+
         Interop.ContextOverflow ->
             ( { model | notice = Just "The conversation no longer fits the model's context window, so its oldest messages were left out of this reply." }
             , Cmd.none
@@ -412,7 +492,7 @@ finish outcome model =
                         model.messages
 
                     else
-                        model.messages ++ [ { role = Assistant, content = content } ]
+                        model.messages ++ [ { role = Assistant, content = content, attachments = [] } ]
                 , notice =
                     case ( outcome.error, reply.stopping ) of
                         ( Just message, False ) ->
@@ -426,6 +506,24 @@ finish outcome model =
 
         _ ->
             ( model, Cmd.none )
+
+
+isReadable : String -> Bool
+isReadable mediaType =
+    isImage mediaType || String.startsWith "audio/" mediaType
+
+
+isImage : String -> Bool
+isImage =
+    String.startsWith "image/"
+
+
+{-| Reads a picked file into a `data:` URL, which is what the attachment carries to the model.
+-}
+read : File -> Cmd Msg
+read file =
+    File.toUrl file
+        |> Task.perform (\url -> FileRead { name = File.name file, mediaType = File.mime file, url = url })
 
 
 {-| Puts the current conversation at the top of the recents, unless it has no messages.
@@ -447,18 +545,37 @@ shelve model =
 
 open : List Message -> Model -> Model
 open messages model =
-    { model | messages = messages, draft = "", notice = Nothing, holding = False, edges = { start = False, end = False } }
+    { model | messages = messages, draft = "", attachments = [], notice = Nothing, holding = False, edges = { start = False, end = False } }
 
 
 {-| A recent conversation is named after its first question.
 -}
 conversationTitle : Conversation -> String
 conversationTitle conversation =
-    conversation.messages
-        |> List.filter (\message -> message.role == User)
-        |> List.head
-        |> Maybe.map .content
-        |> Maybe.withDefault "Untitled"
+    case List.filter (\message -> message.role == User) conversation.messages of
+        first :: _ ->
+            if String.isEmpty first.content then
+                case first.attachments of
+                    attachment :: _ ->
+                        attachmentKind attachment
+
+                    [] ->
+                        "Untitled"
+
+            else
+                first.content
+
+        [] ->
+            "Untitled"
+
+
+attachmentKind : Attachment -> String
+attachmentKind attachment =
+    if isImage attachment.mediaType then
+        "Image"
+
+    else
+        "Audio"
 
 
 chatId : String
@@ -824,16 +941,23 @@ viewMessage copied index message =
     case message.role of
         User ->
             MessageScroller.item id
-                [ class "flex justify-end" ]
-                [ div [ class "max-w-[70%] rounded-3xl bg-muted px-4 py-2.5 whitespace-pre-wrap" ]
-                    [ text message.content ]
-                ]
+                [ class "flex flex-col items-end gap-2" ]
+                (List.map viewSentAttachment message.attachments
+                    ++ (if String.isEmpty message.content then
+                            []
+
+                        else
+                            [ div [ class "max-w-[70%] rounded-3xl bg-muted px-4 py-2.5 whitespace-pre-wrap" ]
+                                [ text message.content ]
+                            ]
+                       )
+                )
                 |> MessageScroller.anchor
 
         Assistant ->
             MessageScroller.item id
                 [ class "flex flex-col items-start gap-1" ]
-                [ p [ class "leading-7 whitespace-pre-wrap" ] [ text message.content ]
+                [ viewMarkdown message.content
                 , Button.new
                     |> Button.icon
                         (if copied == Just index then
@@ -854,6 +978,53 @@ viewMessage copied index message =
                 ]
 
 
+{-| A reply, formatted from its markdown. A reply still coming in can stop in the middle of a block,
+and until the parser makes sense of it again the text is shown as it is.
+-}
+viewMarkdown : String -> Html msg
+viewMarkdown source =
+    case
+        Markdown.Parser.parse source
+            |> Result.mapError (\_ -> ())
+            |> Result.andThen (Markdown.Renderer.render markdownRenderer >> Result.mapError (\_ -> ()))
+    of
+        Ok blocks ->
+            div [ class "markdown w-full" ] blocks
+
+        Err () ->
+            p [ class "leading-7 whitespace-pre-wrap" ] [ text source ]
+
+
+{-| Links open beside the conversation, not in its place.
+-}
+markdownRenderer : Markdown.Renderer.Renderer (Html msg)
+markdownRenderer =
+    let
+        default =
+            Markdown.Renderer.defaultHtmlRenderer
+    in
+    { default
+        | link =
+            \link content ->
+                a
+                    (href link.destination
+                        :: target "_blank"
+                        :: rel "noreferrer"
+                        :: (link.title |> Maybe.map (Html.Attributes.title >> List.singleton) |> Maybe.withDefault [])
+                    )
+                    content
+    }
+
+
+viewSentAttachment : Attachment -> Html msg
+viewSentAttachment attachment =
+    if isImage attachment.mediaType then
+        img [ src attachment.url, alt attachment.name, class "max-h-72 max-w-[70%] rounded-3xl object-cover" ] []
+
+    else
+        audio [ src attachment.url, controls True, class "w-72 max-w-[70%]" ] []
+
+
 {-| The reply as it comes in, under the turn it answers. A pulsing dot stands in until the first words.
 -}
 viewReply : Request -> List (MessageScroller.Item Msg)
@@ -872,7 +1043,7 @@ viewReply request =
                     thinking
 
                   else
-                    p [ class "leading-7 whitespace-pre-wrap" ] [ text reply.text ]
+                    viewMarkdown reply.text
                 ]
             ]
 
@@ -902,20 +1073,119 @@ viewComposer model =
 
             Nothing ->
                 text ""
-        , InputGroup.view
-            [ class "items-end! gap-2 rounded-[1.75rem]! border-transparent! bg-muted p-2.5 shadow-sm ring-0! dark:bg-muted!" ]
-            [ InputGroup.textarea
-                [ name "prompt"
-                , placeholder "Ask elmgpt"
-                , value model.draft
-                , onInput DraftChanged
-                , onEnter SendClicked
-                , class "max-h-52 min-h-0! self-center px-0! py-1.5! ps-2.5! leading-6 md:text-base!"
+        , div
+            [ class "flex flex-col bg-muted p-2.5 shadow-sm"
+            , class
+                (if List.isEmpty model.attachments then
+                    "rounded-[1.75rem]"
+
+                 else
+                    "gap-2 rounded-3xl"
+                )
+            ]
+            [ if List.isEmpty model.attachments then
+                text ""
+
+              else
+                AttachmentView.group [] (List.indexedMap viewPendingAttachment model.attachments)
+            , InputGroup.view
+                [ class "items-end! gap-1 border-0! bg-transparent! ring-0!" ]
+                [ InputGroup.textarea
+                    [ name "prompt"
+                    , placeholder
+                        (if model.recording == NotRecording then
+                            "Ask elmgpt"
+
+                         else
+                            "Listening…"
+                        )
+                    , value model.draft
+                    , onInput DraftChanged
+                    , onEnter SendClicked
+                    , class "max-h-52 min-h-0! self-center px-0! py-1.5! ps-1! leading-6 md:text-base!"
+                    ]
+                , InputGroup.start [ class "ms-0! py-0! ps-0!" ]
+                    [ Button.new
+                        |> Button.icon (Phosphor.plus Regular |> Phosphor.toHtml [])
+                        |> Button.label "Add images or audio"
+                        |> Button.ghost
+                        |> Button.large
+                        |> Button.rounded
+                        |> Button.toHtml [ onClick AttachClicked, class "text-foreground [&_svg]:size-5!" ]
+                    ]
+                , InputGroup.end [ class "me-0! gap-1! py-0! pe-0!" ]
+                    [ viewRecordButton model.recording
+                    , viewSendButton model
+                    ]
                 ]
-            , InputGroup.end [ class "me-0! gap-1! py-0! pe-0!" ]
-                [ viewSendButton model ]
             ]
         ]
+
+
+{-| An attachment waiting in the composer, with a button to take it out again.
+-}
+viewPendingAttachment : Int -> Attachment -> Html Msg
+viewPendingAttachment index attachment =
+    AttachmentView.new
+        |> AttachmentView.title attachment.name
+        |> AttachmentView.description (attachmentKind attachment ++ " · " ++ subtype attachment.mediaType)
+        |> (if isImage attachment.mediaType then
+                AttachmentView.image [ src attachment.url, alt attachment.name ]
+
+            else
+                AttachmentView.icon (Phosphor.waveform Regular |> Phosphor.toHtml [])
+           )
+        |> AttachmentView.actions
+            [ Button.new
+                |> Button.icon (Phosphor.x Regular |> Phosphor.toHtml [])
+                |> Button.label ("Remove " ++ attachment.name)
+                |> AttachmentView.action [ onClick (AttachmentRemoved index) ]
+            ]
+        |> AttachmentView.small
+        |> AttachmentView.toHtml [ class "max-w-56 bg-background/60" ]
+
+
+{-| `PNG` for `image/png`.
+-}
+subtype : String -> String
+subtype mediaType =
+    mediaType
+        |> String.split "/"
+        |> List.drop 1
+        |> List.head
+        |> Maybe.withDefault mediaType
+        |> String.toUpper
+
+
+viewRecordButton : Recording -> Html Msg
+viewRecordButton recording =
+    case recording of
+        NotRecording ->
+            Button.new
+                |> Button.icon (Phosphor.microphone Regular |> Phosphor.toHtml [])
+                |> Button.label "Record a voice message"
+                |> Button.ghost
+                |> Button.large
+                |> Button.rounded
+                |> Button.toHtml [ onClick RecordClicked, class "text-foreground [&_svg]:size-5!" ]
+
+        Recording _ ->
+            Button.new
+                |> Button.text "Stop recording"
+                |> Button.startIcon (span [ class "size-2 animate-pulse rounded-full bg-destructive" ] [])
+                |> Button.destructive
+                |> Button.large
+                |> Button.rounded
+                |> Button.toHtml [ onClick RecordStopClicked ]
+
+        _ ->
+            Button.new
+                |> Button.icon (Spinner.view [])
+                |> Button.label "Preparing the voice message"
+                |> Button.ghost
+                |> Button.large
+                |> Button.rounded
+                |> Button.toHtml [ disabled True ]
 
 
 viewSendButton : Model -> Html Msg

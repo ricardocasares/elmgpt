@@ -563,3 +563,103 @@
     }
   }
 }
+
+/*
+  Markdown in the assistant's replies. The renderer emits plain elements, so they are styled here,
+  from the theme tokens, in the spacing of a chat reply.
+*/
+@layer components {
+  .markdown {
+    @apply leading-7 break-words;
+
+    & > :first-child {
+      @apply mt-0;
+    }
+    & > :last-child {
+      @apply mb-0;
+    }
+
+    & p,
+    & ul,
+    & ol,
+    & pre,
+    & blockquote,
+    & table {
+      @apply my-3;
+    }
+
+    & h1 {
+      @apply mt-6 mb-3 text-2xl font-semibold;
+    }
+    & h2 {
+      @apply mt-6 mb-3 text-xl font-semibold;
+    }
+    & h3 {
+      @apply mt-5 mb-2 text-lg font-semibold;
+    }
+    & h4,
+    & h5,
+    & h6 {
+      @apply mt-4 mb-2 font-semibold;
+    }
+
+    & strong {
+      @apply font-semibold;
+    }
+
+    & a {
+      @apply font-medium underline underline-offset-4 decoration-foreground/30 hover:decoration-foreground;
+    }
+
+    & ul {
+      @apply list-disc ps-6;
+    }
+    & ol {
+      @apply list-decimal ps-6;
+    }
+    & li {
+      @apply my-1 ps-1;
+    }
+    & li > ul,
+    & li > ol {
+      @apply my-1;
+    }
+    & li::marker {
+      @apply text-muted-foreground;
+    }
+
+    & blockquote {
+      @apply border-s-2 ps-4 text-muted-foreground;
+    }
+
+    & hr {
+      @apply my-6 border-border;
+    }
+
+    & code {
+      @apply rounded-md bg-muted px-1.5 py-0.5 font-mono text-[0.875em];
+    }
+    & pre {
+      @apply overflow-x-auto rounded-2xl bg-muted p-4 text-sm leading-6;
+
+      & code {
+        @apply bg-transparent p-0 text-[1em];
+      }
+    }
+
+    & table {
+      @apply block w-full overflow-x-auto border-collapse text-sm;
+    }
+    & th,
+    & td {
+      @apply border-b px-3 py-2 text-start;
+    }
+    & th {
+      @apply font-semibold;
+    }
+
+    & img {
+      @apply max-w-full rounded-2xl;
+    }
+  }
+}

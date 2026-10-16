@@ -29,10 +29,45 @@ const err = (e: unknown) => e instanceof Error ? e.message : String(e);
 
 const ai = init({ onContextOverflow: () => send({ tag: "ContextOverflow" }) });
 
-// An AbortController crosses the ports as an opaque value: Elm holds it and hands it back as it
-// came, so these casts only name what it is.
-const opaque = (ctrl: AbortController) => ctrl as unknown as JsonValue;
+// An AbortController or a MediaRecorder crosses the ports as an opaque value: Elm holds it and hands
+// it back as it came, so these casts only name what it is.
+const opaque = (value: AbortController | MediaRecorder) => value as unknown as JsonValue;
 const controller = (value: JsonValue) => value as unknown as AbortController;
+const recorder = (value: JsonValue) => value as unknown as MediaRecorder;
+
+const toDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+
+//-- RECORDING
+
+// The recorder sends the clip once it stops, and lets go of the microphone.
+const record = (stream: MediaStream) => {
+  const recorder = new MediaRecorder(stream);
+  const chunks: Blob[] = [];
+  recorder.addEventListener("dataavailable", (event) => chunks.push(event.data));
+  recorder.addEventListener("stop", () => {
+    stream.getTracks().forEach((track) => track.stop());
+    const blob = new Blob(chunks, { type: recorder.mimeType });
+    toDataUrl(blob).then(
+      (url) =>
+        send({
+          tag: "Recorded",
+          name: "Voice message",
+          // The model takes `audio/webm`, not the codec parameter after it.
+          mediaType: blob.type.split(";")[0],
+          url,
+        }),
+      (error) => send({ tag: "RecordingError", message: err(error) }),
+    );
+  });
+  recorder.start();
+  return recorder;
+};
 
 //-- PORTS:SEND
 
@@ -124,6 +159,19 @@ app.ports.interopFromElm.subscribe((msg) => {
 
     case "Abort":
       return controller(msg.data).abort();
+
+    case "StartRecording":
+      return navigator.mediaDevices
+        .getUserMedia({ audio: true })
+        .then(record)
+        .then(
+          (recorder) =>
+            send({ tag: "RecordingStarted", recorder: opaque(recorder) }),
+          (error) => send({ tag: "RecordingError", message: err(error) }),
+        );
+
+    case "StopRecording":
+      return recorder(msg.data).stop();
 
     default:
       return msg satisfies never;

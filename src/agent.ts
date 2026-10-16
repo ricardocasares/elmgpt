@@ -6,6 +6,34 @@ import {
     type BrowserAIChatSettings,
 } from "@browser-ai/core";
 
+/** A turn as Elm holds it: attachments are `data:` URLs of images and audio clips. */
+export type ChatMessage = {
+    role: "user" | "assistant";
+    content: string;
+    attachments: { name: string; mediaType: string; url: string }[];
+};
+
+/**
+ * The AI SDK's shape of a turn. Attachments become file parts, which browser-ai hands to the
+ * Prompt API as image and audio inputs, asking for a session that expects them.
+ */
+const toModelMessage = ({ role, content, attachments }: ChatMessage): ModelMessage =>
+    role === "assistant"
+        ? { role, content }
+        : {
+              role,
+              content: [
+                  ...(content ? [{ type: "text" as const, text: content }] : []),
+                  ...attachments.map(({ name, mediaType, url }) => ({
+                      type: "file" as const,
+                      filename: name,
+                      mediaType,
+                      // The base64 after the comma of a `data:` URL.
+                      data: url.slice(url.indexOf(",") + 1),
+                  })),
+              ],
+          };
+
 /** What the Prompt API says about the built-in model. `unsupported` is a browser without the API. */
 export type Availability =
     | "unsupported"
@@ -69,11 +97,11 @@ export function init(settings: BrowserAIChatSettings) {
 
         generate: async (
             instructions: string,
-            messages: ModelMessage[],
+            messages: ChatMessage[],
             signal: AbortSignal,
         ): Promise<string> => {
             const result = await agent(instructions).generate({
-                messages,
+                messages: messages.map(toModelMessage),
                 abortSignal: signal,
             });
             return result.text;
@@ -81,12 +109,12 @@ export function init(settings: BrowserAIChatSettings) {
 
         stream: async (
             instructions: string,
-            messages: ModelMessage[],
+            messages: ChatMessage[],
             signal: AbortSignal,
             onChunk: (text: string) => void,
         ): Promise<void> => {
             const result = await agent(instructions).stream({
-                messages,
+                messages: messages.map(toModelMessage),
                 abortSignal: signal,
             });
             for await (const part of result.stream) {

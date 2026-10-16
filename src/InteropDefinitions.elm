@@ -1,9 +1,11 @@
 module InteropDefinitions exposing
     ( AbortController
+    , Attachment
     , Availability(..)
     , Flags
     , FromElm(..)
     , Message
+    , Recorder
     , Request
     , Role(..)
     , Theme(..)
@@ -50,6 +52,13 @@ type AbortController
     = AbortController Decode.Value
 
 
+{-| A JavaScript `MediaRecorder` taking a voice message, held by Elm like an `AbortController`.
+TypeScript makes one on `StartRecording` and stops it on `StopRecording`.
+-}
+type Recorder
+    = Recorder Decode.Value
+
+
 {-| Whether the browser's built-in model can be used, as the Prompt API reports it. `Unsupported` is
 a browser without the API at all.
 -}
@@ -66,11 +75,22 @@ type Role
     | Assistant
 
 
-{-| A turn of the conversation, in the shape the AI SDK takes.
+{-| A turn of the conversation. TypeScript turns it into the AI SDK's shape, with the attachments
+as file parts.
 -}
 type alias Message =
     { role : Role
     , content : String
+    , attachments : List Attachment
+    }
+
+
+{-| An image or an audio clip the user sent, as a `data:` URL. The model reads both.
+-}
+type alias Attachment =
+    { name : String
+    , mediaType : String
+    , url : String
     }
 
 
@@ -94,6 +114,8 @@ type FromElm
     | Generate Request
     | Stream Request
     | Abort AbortController
+    | StartRecording
+    | StopRecording Recorder
 
 
 type ToElm
@@ -113,6 +135,9 @@ type ToElm
     | StreamEnded
     | StreamError String
     | ContextOverflow
+    | RecordingStarted Recorder
+    | Recorded Attachment
+    | RecordingError String
 
 
 {-| `theme` is what the user last chose, if anything.
@@ -143,7 +168,7 @@ themeToString theme =
 fromElm : Encoder FromElm
 fromElm =
     TsEncode.union
-        (\vCopyToClipboard vReadFromLocalStorage vWriteToLocalStorage vCheckAvailability vCreateSession vCreateAbortController vGenerate vStream vAbort value ->
+        (\vCopyToClipboard vReadFromLocalStorage vWriteToLocalStorage vCheckAvailability vCreateSession vCreateAbortController vGenerate vStream vAbort vStartRecording vStopRecording value ->
             case value of
                 CopyToClipboard text ->
                     vCopyToClipboard text
@@ -171,6 +196,12 @@ fromElm =
 
                 Abort controller ->
                     vAbort controller
+
+                StartRecording ->
+                    vStartRecording ()
+
+                StopRecording recorder ->
+                    vStopRecording recorder
         )
         |> TsEncode.variantTagged "CopyToClipboard" TsEncode.string
         |> TsEncode.variantTagged "ReadFromLocalStorage" TsEncode.string
@@ -186,6 +217,8 @@ fromElm =
         |> TsEncode.variantTagged "Generate" requestEncoder
         |> TsEncode.variantTagged "Stream" requestEncoder
         |> TsEncode.variantTagged "Abort" abortControllerEncoder
+        |> TsEncode.variantObject "StartRecording" []
+        |> TsEncode.variantTagged "StopRecording" (TsEncode.map (\(Recorder value) -> value) TsEncode.value)
         |> TsEncode.buildUnion
 
 
@@ -203,6 +236,16 @@ messageEncoder =
     TsEncode.object
         [ TsEncode.required "role" .role roleEncoder
         , TsEncode.required "content" .content TsEncode.string
+        , TsEncode.required "attachments" .attachments (TsEncode.list attachmentEncoder)
+        ]
+
+
+attachmentEncoder : Encoder Attachment
+attachmentEncoder =
+    TsEncode.object
+        [ TsEncode.required "name" .name TsEncode.string
+        , TsEncode.required "mediaType" .mediaType TsEncode.string
+        , TsEncode.required "url" .url TsEncode.string
         ]
 
 
@@ -258,6 +301,14 @@ toElm =
         , ( "StreamEnded", TsDecode.succeed StreamEnded )
         , ( "StreamError", TsDecode.map StreamError messageField )
         , ( "ContextOverflow", TsDecode.succeed ContextOverflow )
+        , ( "RecordingStarted", TsDecode.map (Recorder >> RecordingStarted) (TsDecode.field "recorder" TsDecode.value) )
+        , ( "Recorded"
+          , TsDecode.map3 (\name mediaType url -> Recorded { name = name, mediaType = mediaType, url = url })
+                (TsDecode.field "name" TsDecode.string)
+                (TsDecode.field "mediaType" TsDecode.string)
+                (TsDecode.field "url" TsDecode.string)
+          )
+        , ( "RecordingError", TsDecode.map RecordingError messageField )
         ]
 
 
