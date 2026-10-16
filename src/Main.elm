@@ -5,14 +5,13 @@ import Browser.Dom
 import Html exposing (Attribute, Html, a, aside, div, h1, header, main_, nav, p, span, text)
 import Html.Attributes exposing (attribute, class, disabled, href, name, placeholder, rel, target, type_, value)
 import Html.Events exposing (onClick, onInput, preventDefaultOn)
-import Icons
 import InteropDefinitions as Interop exposing (AbortController, Message, Role(..), Theme)
 import InteropPorts
 import Json.Decode as Decode
+import Phosphor exposing (IconWeight(..))
 import Process
 import Task
 import UI.Alert as Alert
-import UI.Avatar as Avatar
 import UI.DropdownMenu as DropdownMenu
 import UI.Button as Button
 import UI.InputGroup as InputGroup
@@ -537,7 +536,7 @@ viewRail model =
           else
             sidebarToggle model
         , Button.new
-            |> Button.icon Icons.newChat
+            |> Button.icon (Phosphor.notePencil Regular |> Phosphor.toHtml [])
             |> Button.label "New chat"
             |> Button.ghost
             |> Button.large
@@ -550,25 +549,26 @@ viewRail model =
             [ DropdownMenu.new
                 |> DropdownMenu.id "user-menu"
                 |> DropdownMenu.trigger
-                    [ class "rounded-full outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-                    , attribute "aria-label" "User menu"
-                    ]
-                    [ Avatar.new
-                        |> Avatar.fallback [ text "EG" ]
-                        |> Avatar.small
-                        |> Avatar.toHtml []
-                    ]
+                    (attribute "aria-label" "Settings"
+                        :: class "text-sidebar-foreground [&_svg]:size-5!"
+                        :: (Button.new
+                                |> Button.ghost
+                                |> Button.large
+                                |> Button.toAttributes
+                           )
+                    )
+                    [ Phosphor.slidersHorizontal Regular |> Phosphor.toHtml [] ]
                 |> DropdownMenu.right
                 |> DropdownMenu.alignEnd
                 |> DropdownMenu.content
                     [ DropdownMenu.group
                         [ DropdownMenu.label [ text "Theme" ]
-                        , themeItem model Interop.Light Icons.sun "Light"
-                        , themeItem model Interop.Dark Icons.moon "Dark"
-                        , themeItem model Interop.System Icons.monitor "System"
+                        , themeItem model Interop.Light (Phosphor.sun Regular |> Phosphor.toHtml []) "Light"
+                        , themeItem model Interop.Dark (Phosphor.moon Regular |> Phosphor.toHtml []) "Dark"
+                        , themeItem model Interop.System (Phosphor.monitor Regular |> Phosphor.toHtml []) "System"
                         ]
                     , DropdownMenu.separator
-                    , DropdownMenu.item [ onClick NewChatClicked ] [ Icons.newChat, text "New chat" ]
+                    , DropdownMenu.item [ onClick NewChatClicked ] [ Phosphor.notePencil Regular |> Phosphor.toHtml [], text "New chat" ]
                         |> (if isRunning model.request then
                                 DropdownMenu.disabled
 
@@ -584,7 +584,7 @@ viewRail model =
 sidebarToggle : Model -> Html Msg
 sidebarToggle model =
     Button.new
-        |> Button.icon Icons.panelLeft
+        |> Button.icon (Phosphor.sidebarSimple Regular |> Phosphor.toHtml [])
         |> Button.label
             (if model.sidebarOpen then
                 "Close sidebar"
@@ -609,7 +609,7 @@ viewSidebar model =
         , div [ class "px-2" ]
             [ Button.new
                 |> Button.text "New chat"
-                |> Button.startIcon Icons.newChat
+                |> Button.startIcon (Phosphor.notePencil Regular |> Phosphor.toHtml [])
                 |> Button.ghost
                 |> Button.large
                 |> Button.toHtml [ onClick NewChatClicked, disabled (isRunning model.request), class "w-full justify-start px-3! text-[0.95rem] hover:bg-sidebar-accent! [&_svg]:size-4.5!" ]
@@ -677,7 +677,7 @@ viewHeader model =
 
               else
                 Button.new
-                    |> Button.icon Icons.newChat
+                    |> Button.icon (Phosphor.notePencil Regular |> Phosphor.toHtml [])
                     |> Button.label "New chat"
                     |> Button.ghost
                     |> Button.large
@@ -701,10 +701,10 @@ viewWelcome model =
 
 suggestions : List ( Html Msg, String )
 suggestions =
-    [ ( Icons.umbrella, "Do I need an umbrella in London tomorrow?" )
-    , ( Icons.thermometer, "What should I wear for 5°C and windy?" )
-    , ( Icons.cloud, "Explain why clouds form in plain words" )
-    , ( Icons.wind, "Is it a good day to go sailing with 20-knot winds?" )
+    [ ( Phosphor.umbrella Regular |> Phosphor.toHtml [], "Do I need an umbrella in London tomorrow?" )
+    , ( Phosphor.thermometer Regular |> Phosphor.toHtml [], "What should I wear for 5°C and windy?" )
+    , ( Phosphor.cloud Regular |> Phosphor.toHtml [], "Explain why clouds form in plain words" )
+    , ( Phosphor.wind Regular |> Phosphor.toHtml [], "Is it a good day to go sailing with 20-knot winds?" )
     ]
 
 
@@ -837,10 +837,10 @@ viewMessage copied index message =
                 , Button.new
                     |> Button.icon
                         (if copied == Just index then
-                            Icons.check
+                            Phosphor.check Regular |> Phosphor.toHtml []
 
                          else
-                            Icons.copy
+                            Phosphor.copy Regular |> Phosphor.toHtml []
                         )
                     |> Button.label
                         (if copied == Just index then
@@ -923,7 +923,7 @@ viewSendButton model =
     case model.request of
         Idle ->
             Button.new
-                |> Button.icon Icons.arrowUp
+                |> Button.icon (Phosphor.arrowUp Bold |> Phosphor.toHtml [])
                 |> Button.label "Send"
                 |> Button.large
                 |> Button.rounded
@@ -939,7 +939,7 @@ viewSendButton model =
 stopButton : List (Attribute Msg) -> Html Msg
 stopButton attrs =
     Button.new
-        |> Button.icon Icons.square
+        |> Button.icon (Phosphor.stop Fill |> Phosphor.toHtml [])
         |> Button.label "Stop"
         |> Button.large
         |> Button.rounded
