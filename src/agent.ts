@@ -37,6 +37,15 @@ const toModelMessage = ({ role, content, attachments }: ChatMessage): ModelMessa
 /** How many tokens of the model's context window the conversation takes. */
 export type Context = { used: number; window: number };
 
+/**
+ * Whether the Prompt API refused the input because it doesn't fit the context window. Chrome
+ * throws a `QuotaExceededError`, which the AI SDK may wrap in an error of its own.
+ */
+export const isInputTooLarge = (error: unknown): boolean =>
+    error instanceof Error || error instanceof DOMException
+        ? error.name === "QuotaExceededError" || isInputTooLarge((error as Error).cause)
+        : false;
+
 /** What the Prompt API says about the built-in model. `unsupported` is a browser without the API. */
 export type Availability =
     | "unsupported"
@@ -90,7 +99,8 @@ export function init(settings: BrowserAIChatSettings) {
                 stopWhen: isStepCount(20),
             }),
             // The reply's session holds the whole conversation, so what it has used once the reply
-            // ends is what the conversation takes of the context window.
+            // ends is what the conversation takes of the context window. A reply that failed is not
+            // measured: its session may hold only the instructions.
             measure: (onContext: (context: Context) => void) => {
                 const used = model.getContextUsage();
                 const window = model.getContextWindow();
@@ -121,9 +131,11 @@ export function init(settings: BrowserAIChatSettings) {
                     messages: messages.map(toModelMessage),
                     abortSignal: signal,
                 });
-                return result.text;
-            } finally {
                 reply.measure(onContext);
+                return result.text;
+            } catch (error) {
+                if (signal.aborted) reply.measure(onContext);
+                throw error;
             }
         },
 
@@ -149,8 +161,10 @@ export function init(settings: BrowserAIChatSettings) {
                             throw part.error;
                     }
                 }
-            } finally {
                 reply.measure(onContext);
+            } catch (error) {
+                if (signal.aborted) reply.measure(onContext);
+                throw error;
             }
         },
     };

@@ -148,13 +148,16 @@ type ToElm
     | Recorded Attachment
     | RecordingError String
     | ContextMeasured Context
+    | InputTooLarge
 
 
-{-| `theme` is what the user last chose, if anything.
+{-| `theme` is what the user last chose, if anything. `now` is when the page loaded, in milliseconds,
+which the conversations take their ids from.
 -}
 type alias Flags =
     { theme : Maybe Theme
     , systemDark : Bool
+    , now : Int
     }
 
 
@@ -319,6 +322,7 @@ toElm =
                 (TsDecode.field "url" TsDecode.string)
           )
         , ( "RecordingError", TsDecode.map RecordingError messageField )
+        , ( "InputTooLarge", TsDecode.succeed InputTooLarge )
         , ( "ContextMeasured"
           , TsDecode.map2 (\used window -> ContextMeasured { used = used, window = window })
                 (TsDecode.field "used" TsDecode.float)
@@ -364,6 +368,7 @@ themeDecoder =
 
 flags : Decoder Flags
 flags =
-    TsDecode.map2 Flags
+    TsDecode.map3 Flags
         (TsDecode.field "theme" (TsDecode.nullable themeDecoder))
         (TsDecode.field "systemDark" TsDecode.bool)
+        (TsDecode.field "now" TsDecode.int)

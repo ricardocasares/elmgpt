@@ -1,4 +1,4 @@
-import { init } from "./agent";
+import { init, isInputTooLarge } from "./agent";
 import { Elm, type Flags, type JsonValue, type ToElm } from "./Main.elm";
 
 //-- FLAGS
@@ -19,6 +19,7 @@ const app = Elm.Main.init({
   flags: {
     theme: getStoredTheme(),
     systemDark: media.matches,
+    now: Date.now(),
   },
 });
 
@@ -142,7 +143,12 @@ app.ports.interopFromElm.subscribe((msg) => {
         )
         .then(
           (text) => send({ tag: "Generated", text }),
-          (error) => send({ tag: "GenerationError", message: err(error) }),
+          (error) =>
+            send(
+              isInputTooLarge(error)
+                ? { tag: "InputTooLarge" }
+                : { tag: "GenerationError", message: err(error) },
+            ),
         );
 
     case "Stream":
@@ -156,7 +162,12 @@ app.ports.interopFromElm.subscribe((msg) => {
         )
         .then(
           () => send({ tag: "StreamEnded" }),
-          (error) => send({ tag: "StreamError", message: err(error) }),
+          (error) =>
+            send(
+              isInputTooLarge(error)
+                ? { tag: "InputTooLarge" }
+                : { tag: "StreamError", message: err(error) },
+            ),
         );
 
     case "Abort":

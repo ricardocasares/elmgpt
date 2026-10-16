@@ -10,6 +10,7 @@ import File.Select
 import InteropDefinitions as Interop exposing (AbortController, Attachment, Context, Message, Recorder, Role(..), Theme)
 import InteropPorts
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Markdown.Parser
 import Markdown.Renderer
 import Svg
@@ -25,6 +26,7 @@ import UI.InputGroup as InputGroup
 import UI.Item as Item
 import UI.MessageScroller as MessageScroller
 import UI.Progress as Progress
+import UI.Separator as Separator
 import UI.Spinner as Spinner
 import UI.Tabs as Tabs
 
@@ -54,7 +56,11 @@ type alias Model =
     { theme : Theme
     , systemDark : Bool
     , status : Status
+    , conversation : Int
+    , nextConversation : Int
     , messages : List Message
+    , compacted : Int
+    , compactionDue : Bool
     , draft : String
     , attachments : List Attachment
     , context : Maybe Context
@@ -74,6 +80,7 @@ type alias Model =
 type alias Conversation =
     { id : Int
     , messages : List Message
+    , compacted : Int
     , context : Maybe Context
     }
 
@@ -120,14 +127,18 @@ type alias Reply =
 init : Decode.Value -> ( Model, Cmd Msg )
 init flags =
     let
-        { theme, systemDark } =
+        { theme, systemDark, now } =
             InteropPorts.decodeFlags flags
-                |> Result.withDefault { theme = Nothing, systemDark = False }
+                |> Result.withDefault { theme = Nothing, systemDark = False, now = 0 }
     in
     ( { theme = Maybe.withDefault Interop.System theme
       , systemDark = systemDark
       , status = Checking
+      , conversation = now
+      , nextConversation = now + 1
       , messages = []
+      , compacted = 0
+      , compactionDue = False
       , draft = ""
       , attachments = []
       , context = Nothing
@@ -293,7 +304,15 @@ update msg model =
                 ( model, Cmd.none )
 
             else
-                ( open [] Nothing (shelve model), Cmd.none )
+                let
+                    shelved =
+                        shelve model
+                in
+                ( open
+                    { id = shelved.nextConversation, messages = [], compacted = 0, context = Nothing }
+                    { shelved | nextConversation = shelved.nextConversation + 1 }
+                , Cmd.none
+                )
 
         RecentClicked id ->
             if isRunning model.request then
@@ -306,7 +325,7 @@ update msg model =
                 in
                 case List.filter (\conversation -> conversation.id == id) shelved.recents of
                     conversation :: _ ->
-                        ( open conversation.messages conversation.context
+                        ( open conversation
                             { shelved | recents = List.filter (\other -> other.id /= id) shelved.recents }
                         , scroll MessageScroller.Instant
                         )
@@ -432,7 +451,7 @@ fromInterop event model =
                     let
                         request =
                             { instructions = instructions
-                            , messages = model.messages
+                            , messages = inContext model
                             , controller = controller
                             }
                     in
@@ -472,8 +491,47 @@ fromInterop event model =
         Interop.RecordingError message ->
             ( { model | recording = NotRecording, notice = Just message }, Cmd.none )
 
+        -- Near the end of the window, the oldest messages leave the context before the next turn needs
+        -- the room. The reply is measured before it ends, so `finish` compacts once it is in the conversation.
         Interop.ContextMeasured context ->
-            ( { model | context = Just context }, Cmd.none )
+            ( { model
+                | context = Just context
+                , compactionDue = context.window > 0 && context.used / context.window >= compactAt
+              }
+            , Cmd.none
+            )
+
+        -- The conversation outgrew the window before it was measured near the end: it is compacted, and
+        -- the turn asked again. Once only the last messages are left, there is nothing more to leave out.
+        Interop.InputTooLarge ->
+            case model.request of
+                Running reply ->
+                    if reply.stopping then
+                        finish { text = Nothing, error = Nothing } model
+
+                    else if List.length (inContext model) > keepInContext then
+                        let
+                            ( compacted, archived ) =
+                                compact { model | request = Starting }
+                        in
+                        ( compacted
+                        , Cmd.batch [ archived, InteropPorts.fromElm Interop.CreateAbortController ]
+                        )
+
+                    else
+                        finish
+                            { text = Nothing
+                            , error =
+                                Just
+                                    ("This message doesn't fit the model's context window, even with only the last "
+                                        ++ String.fromInt keepInContext
+                                        ++ " messages of the conversation. Try a shorter message, fewer attachments or a new chat."
+                                    )
+                            }
+                            { model | request = Running { reply | text = "" } }
+
+                _ ->
+                    ( model, Cmd.none )
 
         Interop.ContextOverflow ->
             ( { model | notice = Just "The conversation no longer fits the model's context window, so its oldest messages were left out of this reply." }
@@ -492,25 +550,34 @@ finish outcome model =
             let
                 content =
                     Maybe.withDefault reply.text outcome.text
-            in
-            ( { model
-                | request = Idle
-                , messages =
-                    if String.isEmpty content then
-                        model.messages
+
+                finished =
+                    { model
+                        | request = Idle
+                        , messages =
+                            if String.isEmpty content then
+                                model.messages
+
+                            else
+                                model.messages ++ [ { role = Assistant, content = content, attachments = [] } ]
+                        , notice =
+                            case ( outcome.error, reply.stopping ) of
+                                ( Just message, False ) ->
+                                    Just message
+
+                                _ ->
+                                    model.notice
+                        , compactionDue = False
+                    }
+
+                ( compacted, archived ) =
+                    if model.compactionDue then
+                        compact finished
 
                     else
-                        model.messages ++ [ { role = Assistant, content = content, attachments = [] } ]
-                , notice =
-                    case ( outcome.error, reply.stopping ) of
-                        ( Just message, False ) ->
-                            Just message
-
-                        _ ->
-                            model.notice
-              }
-            , measure
-            )
+                        ( finished, Cmd.none )
+            in
+            ( compacted, Cmd.batch [ measure, archived ] )
 
         _ ->
             ( model, Cmd.none )
@@ -534,6 +601,74 @@ read file =
         |> Task.perform (\url -> FileRead { name = File.name file, mediaType = File.mime file, url = url })
 
 
+{-| How many of the latest messages the model is given once a conversation has been compacted, and
+the share of the context window that compacts it. See TODO.md for compaction that keeps more.
+-}
+keepInContext : Int
+keepInContext =
+    10
+
+
+compactAt : Float
+compactAt =
+    0.8
+
+
+{-| The part of the conversation the model is given: what comes after the compacted messages.
+-}
+inContext : Model -> List Message
+inContext model =
+    List.drop model.compacted model.messages
+
+
+{-| Leaves all but the last `keepInContext` messages out of the context. They stay in the transcript,
+and are saved in localStorage under the conversation's id, ready for a memory to read them back.
+-}
+compact : Model -> ( Model, Cmd Msg )
+compact model =
+    let
+        upTo =
+            max model.compacted (List.length model.messages - keepInContext)
+    in
+    if upTo > model.compacted then
+        ( { model | compacted = upTo }
+        , InteropPorts.fromElm
+            (Interop.WriteToLocalStorage
+                { key = "archive:" ++ String.fromInt model.conversation
+                , value = Encode.encode 0 (Encode.list encodeArchived (List.take upTo model.messages))
+                }
+            )
+        )
+
+    else
+        ( model, Cmd.none )
+
+
+{-| An archived message keeps its attachments' names and types, not their data, which would soon
+fill localStorage.
+-}
+encodeArchived : Message -> Encode.Value
+encodeArchived message =
+    Encode.object
+        [ ( "role"
+          , Encode.string
+                (case message.role of
+                    User ->
+                        "user"
+
+                    Assistant ->
+                        "assistant"
+                )
+          )
+        , ( "content", Encode.string message.content )
+        , ( "attachments"
+          , Encode.list
+                (\attachment -> Encode.object [ ( "name", Encode.string attachment.name ), ( "mediaType", Encode.string attachment.mediaType ) ])
+                message.attachments
+          )
+        ]
+
+
 {-| Puts the current conversation at the top of the recents, unless it has no messages.
 -}
 shelve : Model -> Model
@@ -544,17 +679,23 @@ shelve model =
     else
         { model
             | recents =
-                { id = 1 + (List.map .id model.recents |> List.maximum |> Maybe.withDefault 0)
+                { id = model.conversation
                 , messages = model.messages
+                , compacted = model.compacted
                 , context = model.context
                 }
                     :: model.recents
         }
 
 
-open : List Message -> Maybe Context -> Model -> Model
-open messages context model =
-    { model | messages = messages, context = context, draft = "", attachments = [], notice = Nothing, holding = False, edges = { start = False, end = False } }
+open : Conversation -> Model -> Model
+open conversation model =
+    { model
+        | conversation = conversation.id
+        , messages = conversation.messages
+        , compacted = conversation.compacted
+        , context = conversation.context
+        , draft = "", attachments = [], notice = Nothing, holding = False, edges = { start = False, end = False } }
 
 
 {-| A recent conversation is named after its first question.
@@ -933,7 +1074,7 @@ viewTranscript model =
         |> MessageScroller.padding "calc(var(--spacing) * 6)"
         |> MessageScroller.busy (isRunning model.request)
         |> MessageScroller.items [ class "mx-auto w-full max-w-3xl gap-6 px-4" ]
-            (List.indexedMap (viewMessage model.copied) model.messages ++ viewReply model.request)
+            (List.concat (List.indexedMap (viewTurn model) model.messages) ++ viewReply model.request)
         |> (if model.holding then
                 MessageScroller.holdTurn
 
@@ -944,6 +1085,27 @@ viewTranscript model =
         |> MessageScroller.onScroll Scrolled
         |> MessageScroller.scrollable model.edges
         |> MessageScroller.toHtml []
+
+
+{-| A message, after the line where the compacted part of the conversation ends.
+-}
+viewTurn : Model -> Int -> Message -> List (MessageScroller.Item Msg)
+viewTurn model index message =
+    if index == model.compacted && index > 0 then
+        [ viewCompacted, viewMessage model.copied index message ]
+
+    else
+        [ viewMessage model.copied index message ]
+
+
+viewCompacted : MessageScroller.Item Msg
+viewCompacted =
+    MessageScroller.item "compacted"
+        [ class "flex items-center gap-3 text-xs text-muted-foreground" ]
+        [ Separator.new |> Separator.toHtml [ class "flex-1" ]
+        , span [ class "text-center" ] [ text "The model no longer sees the messages above. They are saved in this browser." ]
+        , Separator.new |> Separator.toHtml [ class "flex-1" ]
+        ]
 
 
 viewMessage : Maybe Int -> Int -> Message -> MessageScroller.Item Msg
