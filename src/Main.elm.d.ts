@@ -21,9 +21,9 @@ export interface ElmApp {
   };
 }
 
-export type FromElm = { data : { key : string; value : string }; tag : "WriteToLocalStorage" } | { data : string; tag : "ReadFromLocalStorage" } | { data : string; tag : "CopyToClipboard" };
+export type FromElm = { data : JsonValue; tag : "Abort" } | { data : { controller : JsonValue; instructions : string; messages : { content : string; role : "assistant" | "user" }[] }; tag : "Stream" } | { data : { controller : JsonValue; instructions : string; messages : { content : string; role : "assistant" | "user" }[] }; tag : "Generate" } | { tag : "CreateAbortController" } | { tag : "CreateSession" } | { tag : "CheckAvailability" } | { data : { key : string; value : string }; tag : "WriteToLocalStorage" } | { data : string; tag : "ReadFromLocalStorage" } | { data : string; tag : "CopyToClipboard" };
 
-export type ToElm = { dark : boolean; tag : "SystemThemeChanged" } | { key : string; message : string; tag : "LocalStorageError" } | { message : string; tag : "ClipboardError" };
+export type ToElm = { dark : boolean; tag : "SystemThemeChanged" } | { key : string; tag : "LocalStorageRead"; value : string | null } | { key : string; message : string; tag : "LocalStorageError" } | { message : string; tag : "ClipboardError" } | { availability : "unsupported" | "unavailable" | "downloadable" | "downloading" | "available"; tag : "AvailabilityChecked" } | { message : string; tag : "AvailabilityError" } | { progress : number; tag : "DownloadProgress" } | { tag : "SessionCreated" } | { message : string; tag : "SessionError" } | { controller : JsonValue; tag : "AbortControllerCreated" } | { tag : "Generated"; text : string } | { message : string; tag : "GenerationError" } | { tag : "Chunk"; text : string } | { tag : "StreamEnded" } | { message : string; tag : "StreamError" } | { tag : "ContextOverflow" };
 
 export type Flags = { systemDark : boolean; theme : ("light" | "dark" | "system") | null };
 

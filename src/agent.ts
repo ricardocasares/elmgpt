@@ -1,98 +1,103 @@
-import { z } from 'zod'
-import { ToolLoopAgent, isStepCount, tool } from "ai";
-import { browserAI, doesBrowserSupportBrowserAI } from "@browser-ai/core";
-import { type ElmApp } from "./Main.elm";
+import { z } from "zod";
+import { ToolLoopAgent, isStepCount, tool, type ModelMessage } from "ai";
+import {
+    browserAI,
+    doesBrowserSupportBrowserAI,
+    type BrowserAIChatSettings,
+} from "@browser-ai/core";
 
-async function init(app: ElmApp) {
-    if (!doesBrowserSupportBrowserAI()) {
-        return app.ports.interopToElm.send({
-            tag: "AINotSupportedError",
-            error: "Your browser does not support Prompt API"
+/** What the Prompt API says about the built-in model. `unsupported` is a browser without the API. */
+export type Availability =
+    | "unsupported"
+    | "unavailable"
+    | "downloadable"
+    | "downloading"
+    | "available";
+
+const tools = {
+    geolocation: tool({
+        description: "Obtain the user geolocation",
+        inputSchema: z.object({
+            enableHighAccuracy: z.boolean(),
+            timeout: z.number().meta({ description: "Time in milliseconds" }),
+        }),
+        execute: (input) =>
+            new Promise<{ latitude: number; longitude: number; accuracy: number }>(
+                (resolve, reject) =>
+                    navigator.geolocation.getCurrentPosition(
+                        ({ coords }) =>
+                            resolve({
+                                latitude: coords.latitude,
+                                longitude: coords.longitude,
+                                accuracy: coords.accuracy,
+                            }),
+                        (error) => reject(new Error(error.message)),
+                        input,
+                    ),
+            ),
+    }),
+};
+
+/**
+ * The browser's built-in model behind the AI SDK. Every method is a single call with no state of
+ * its own: Elm decides when to check, download, generate and abort, and holds the conversation.
+ */
+export function init(settings: BrowserAIChatSettings) {
+    // browser-ai gives a model instance one Chrome session for life, and sets the system prompt
+    // only when that session is created. This instance checks availability and downloads the model
+    // with progress. Every reply gets an instance of its own, so the instructions apply and the
+    // messages Elm sends are the whole context.
+    const model = browserAI("text", settings);
+
+    const agent = (instructions: string) =>
+        new ToolLoopAgent({
+            model: browserAI("text", settings),
+            instructions,
+            tools,
+            stopWhen: isStepCount(20),
         });
-    }
 
-    const model = browserAI("text", {
-        onContextOverflow: (event) => app.ports.interopToElm.send({ tag: 'AIContextOverflow', error: event }),
-    })
+    return {
+        availability: async (): Promise<Availability> =>
+            doesBrowserSupportBrowserAI() ? model.availability() : "unsupported",
 
-    const availability = await model.availability();
-
-    switch (availability) {
-        case 'unavailable':
-            return app
-                .ports
-                .interopToElm
-                .send({ tag: "AINotAvailableError", error: 'Propmt API is not available in your browser' })
-        case 'available':
-        case 'downloadable':
-            try {
-                await model
-                    .createSessionWithProgress(progress => app
-                        .ports
-                        .interopToElm
-                        .send({ tag: 'AIDownloadProgress', progress }));
-            } catch (err) {
-                return app.ports.interopToElm.send({ tag: 'AIDownloadError', error: String(err) })
-            }
-    }
-
-    if (!availability) {
-        return app.ports.interopToElm.send({
-            tag: "AINotAvailableError",
-            error: "Prompt API is not available See https://github.com/webmachinelearning/prompt-api"
-        });
-    }
-
-    if (availability === 'downloadable') {
-        await model
-            .createSessionWithProgress((progress) => app
-                .ports
-                .interopToElm
-                .send({ tag: 'AIProgress', progress }))
-            .catch(err => app.ports.interopToElm.send({
-                tag: 'AIDownloadError',
-                error: String(err)
-            }));
-    }
-
-    const agent = new ToolLoopAgent({
-        model,
-        instructions: "You are a weather assistant.",
-        tools: {
-            geolocation: tool({
-                description: 'Obtain the user geolocation',
-                inputSchema: z.object({
-                    enableHighAccuracy: z.boolean(),
-                    timeout: z.number().meta({ description: 'Time in milliseconds' })
-                }),
-                execute: async () => {
-                    return new Promise((resolve, reject) =>
-                        navigator.geolocation.getCurrentPosition(resolve, reject, {
-                            enableHighAccuracy: true,
-                            timeout: 5000
-                        }))
-                }
-            })
+        createSession: async (
+            onProgress: (progress: number) => void,
+        ): Promise<void> => {
+            await model.createSessionWithProgress(onProgress);
         },
-        stopWhen: isStepCount(20),
-    });
 
-    const generate = (prompt: string, signal: AbortSignal) => {
-        // TODO
-        // Elm must acquire an abort signal before calling this method
-        // A signal can be passed as an opaque value to Elm via interop.
-        // Then abortion can be handled at main.ts as a message.
-    }
+        generate: async (
+            instructions: string,
+            messages: ModelMessage[],
+            signal: AbortSignal,
+        ): Promise<string> => {
+            const result = await agent(instructions).generate({
+                messages,
+                abortSignal: signal,
+            });
+            return result.text;
+        },
 
-    const stream = (prompt: string, signal: AbortSignal) => {
-        // TODO
-        // Elm must acquire an abort signal before calling this method
-        // A signal can be passed as an opaque value to Elm via interop.
-        // Then abortion can be handled at main.ts as a message.
-    }
-
-    return { stream, generate }
-
+        stream: async (
+            instructions: string,
+            messages: ModelMessage[],
+            signal: AbortSignal,
+            onChunk: (text: string) => void,
+        ): Promise<void> => {
+            const result = await agent(instructions).stream({
+                messages,
+                abortSignal: signal,
+            });
+            for await (const part of result.stream) {
+                switch (part.type) {
+                    case "text-delta":
+                        onChunk(part.text);
+                        break;
+                    case "error":
+                        throw part.error;
+                }
+            }
+        },
+    };
 }
-
-export default { init }
