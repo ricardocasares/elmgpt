@@ -34,6 +34,9 @@ const toModelMessage = ({ role, content, attachments }: ChatMessage): ModelMessa
               ],
           };
 
+/** How many tokens of the model's context window the conversation takes. */
+export type Context = { used: number; window: number };
+
 /** What the Prompt API says about the built-in model. `unsupported` is a browser without the API. */
 export type Availability =
     | "unsupported"
@@ -77,13 +80,24 @@ export function init(settings: BrowserAIChatSettings) {
     // messages Elm sends are the whole context.
     const model = browserAI("text", settings);
 
-    const agent = (instructions: string) =>
-        new ToolLoopAgent({
-            model: browserAI("text", settings),
-            instructions,
-            tools,
-            stopWhen: isStepCount(20),
-        });
+    const agent = (instructions: string) => {
+        const model = browserAI("text", settings);
+        return {
+            agent: new ToolLoopAgent({
+                model,
+                instructions,
+                tools,
+                stopWhen: isStepCount(20),
+            }),
+            // The reply's session holds the whole conversation, so what it has used once the reply
+            // ends is what the conversation takes of the context window.
+            measure: (onContext: (context: Context) => void) => {
+                const used = model.getContextUsage();
+                const window = model.getContextWindow();
+                if (used !== undefined && window !== undefined) onContext({ used, window });
+            },
+        };
+    };
 
     return {
         availability: async (): Promise<Availability> =>
@@ -99,12 +113,18 @@ export function init(settings: BrowserAIChatSettings) {
             instructions: string,
             messages: ChatMessage[],
             signal: AbortSignal,
+            onContext: (context: Context) => void,
         ): Promise<string> => {
-            const result = await agent(instructions).generate({
-                messages: messages.map(toModelMessage),
-                abortSignal: signal,
-            });
-            return result.text;
+            const reply = agent(instructions);
+            try {
+                const result = await reply.agent.generate({
+                    messages: messages.map(toModelMessage),
+                    abortSignal: signal,
+                });
+                return result.text;
+            } finally {
+                reply.measure(onContext);
+            }
         },
 
         stream: async (
@@ -112,19 +132,25 @@ export function init(settings: BrowserAIChatSettings) {
             messages: ChatMessage[],
             signal: AbortSignal,
             onChunk: (text: string) => void,
+            onContext: (context: Context) => void,
         ): Promise<void> => {
-            const result = await agent(instructions).stream({
-                messages: messages.map(toModelMessage),
-                abortSignal: signal,
-            });
-            for await (const part of result.stream) {
-                switch (part.type) {
-                    case "text-delta":
-                        onChunk(part.text);
-                        break;
-                    case "error":
-                        throw part.error;
+            const reply = agent(instructions);
+            try {
+                const result = await reply.agent.stream({
+                    messages: messages.map(toModelMessage),
+                    abortSignal: signal,
+                });
+                for await (const part of result.stream) {
+                    switch (part.type) {
+                        case "text-delta":
+                            onChunk(part.text);
+                            break;
+                        case "error":
+                            throw part.error;
+                    }
                 }
+            } finally {
+                reply.measure(onContext);
             }
         },
     };

@@ -7,11 +7,13 @@ import Html.Attributes exposing (alt, attribute, class, controls, disabled, href
 import Html.Events exposing (onClick, onInput, preventDefaultOn)
 import File exposing (File)
 import File.Select
-import InteropDefinitions as Interop exposing (AbortController, Attachment, Message, Recorder, Role(..), Theme)
+import InteropDefinitions as Interop exposing (AbortController, Attachment, Context, Message, Recorder, Role(..), Theme)
 import InteropPorts
 import Json.Decode as Decode
 import Markdown.Parser
 import Markdown.Renderer
+import Svg
+import Svg.Attributes as SvgA
 import Phosphor exposing (IconWeight(..))
 import Process
 import Task
@@ -55,6 +57,7 @@ type alias Model =
     , messages : List Message
     , draft : String
     , attachments : List Attachment
+    , context : Maybe Context
     , recording : Recording
     , request : Request
     , notice : Maybe String
@@ -71,6 +74,7 @@ type alias Model =
 type alias Conversation =
     { id : Int
     , messages : List Message
+    , context : Maybe Context
     }
 
 
@@ -126,6 +130,7 @@ init flags =
       , messages = []
       , draft = ""
       , attachments = []
+      , context = Nothing
       , recording = NotRecording
       , request = Idle
       , notice = Nothing
@@ -288,7 +293,7 @@ update msg model =
                 ( model, Cmd.none )
 
             else
-                ( open [] (shelve model), Cmd.none )
+                ( open [] Nothing (shelve model), Cmd.none )
 
         RecentClicked id ->
             if isRunning model.request then
@@ -301,7 +306,7 @@ update msg model =
                 in
                 case List.filter (\conversation -> conversation.id == id) shelved.recents of
                     conversation :: _ ->
-                        ( open conversation.messages
+                        ( open conversation.messages conversation.context
                             { shelved | recents = List.filter (\other -> other.id /= id) shelved.recents }
                         , scroll MessageScroller.Instant
                         )
@@ -467,6 +472,9 @@ fromInterop event model =
         Interop.RecordingError message ->
             ( { model | recording = NotRecording, notice = Just message }, Cmd.none )
 
+        Interop.ContextMeasured context ->
+            ( { model | context = Just context }, Cmd.none )
+
         Interop.ContextOverflow ->
             ( { model | notice = Just "The conversation no longer fits the model's context window, so its oldest messages were left out of this reply." }
             , Cmd.none
@@ -538,14 +546,15 @@ shelve model =
             | recents =
                 { id = 1 + (List.map .id model.recents |> List.maximum |> Maybe.withDefault 0)
                 , messages = model.messages
+                , context = model.context
                 }
                     :: model.recents
         }
 
 
-open : List Message -> Model -> Model
-open messages model =
-    { model | messages = messages, draft = "", attachments = [], notice = Nothing, holding = False, edges = { start = False, end = False } }
+open : List Message -> Maybe Context -> Model -> Model
+open messages context model =
+    { model | messages = messages, context = context, draft = "", attachments = [], notice = Nothing, holding = False, edges = { start = False, end = False } }
 
 
 {-| A recent conversation is named after its first question.
@@ -625,8 +634,13 @@ view model =
                             , div [ class "mx-auto flex w-full max-w-3xl flex-col gap-2 px-4 pb-3" ]
                                 [ viewStatus model.status
                                 , viewComposer model
-                                , p [ class "text-center text-xs text-muted-foreground" ]
-                                    [ text "Answers come from a model that runs in this browser. It can make mistakes." ]
+                                , div [ class "grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-1" ]
+                                    [ span [] []
+                                    , p [ class "text-center text-xs text-muted-foreground" ]
+                                        [ text "Answers come from a model that runs in this browser. It can make mistakes." ]
+                                    , div [ class "flex justify-end" ]
+                                        [ Maybe.map viewContext model.context |> Maybe.withDefault (text "") ]
+                                    ]
                                 ]
                             ]
                        )
@@ -1118,6 +1132,71 @@ viewComposer model =
                     , viewSendButton model
                     ]
                 ]
+            ]
+        ]
+
+
+{-| How much of the context window the conversation takes, as a ring that fills up. It warns as the
+window runs out, since the oldest messages are left out from then on.
+-}
+viewContext : Context -> Html msg
+viewContext context =
+    let
+        share =
+            if context.window > 0 then
+                clamp 0 1 (context.used / context.window)
+
+            else
+                0
+
+        percentage =
+            String.fromInt (round (share * 100)) ++ "%"
+
+        description =
+            percentage
+                ++ " of the context used: "
+                ++ String.fromInt (round context.used)
+                ++ " of "
+                ++ String.fromInt (round context.window)
+                ++ " tokens"
+
+        -- The ring's circumference, for a radius of 8.
+        length =
+            2 * pi * 8
+    in
+    span
+        [ attribute "role" "img"
+        , attribute "aria-label" description
+        , Html.Attributes.title description
+        , class "flex items-center gap-1.5 text-xs text-muted-foreground"
+        ]
+        [ text percentage
+        , Svg.svg [ SvgA.viewBox "0 0 20 20", SvgA.class "size-4 -rotate-90" ]
+            [ Svg.circle
+                [ SvgA.cx "10", SvgA.cy "10", SvgA.r "8", SvgA.fill "none", SvgA.strokeWidth "3", SvgA.class "stroke-muted-foreground/30" ]
+                []
+            , Svg.circle
+                [ SvgA.cx "10"
+                , SvgA.cy "10"
+                , SvgA.r "8"
+                , SvgA.fill "none"
+                , SvgA.strokeWidth "3"
+                , SvgA.strokeLinecap "round"
+                , SvgA.strokeDasharray (String.fromFloat length)
+                , SvgA.strokeDashoffset (String.fromFloat (length * (1 - share)))
+                , SvgA.class
+                    (if share >= 0.9 then
+                        "stroke-destructive"
+
+                     else if share >= 0.75 then
+                        "stroke-amber-500"
+
+                     else
+                        "stroke-blue-500"
+                    )
+                , SvgA.class "transition-[stroke-dashoffset] duration-500"
+                ]
+                []
             ]
         ]
 

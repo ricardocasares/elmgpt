@@ -2,6 +2,7 @@ module InteropDefinitions exposing
     ( AbortController
     , Attachment
     , Availability(..)
+    , Context
     , Flags
     , FromElm(..)
     , Message
@@ -85,6 +86,14 @@ type alias Message =
     }
 
 
+{-| How many tokens of the model's context window the conversation takes, measured after each reply.
+-}
+type alias Context =
+    { used : Float
+    , window : Float
+    }
+
+
 {-| An image or an audio clip the user sent, as a `data:` URL. The model reads both.
 -}
 type alias Attachment =
@@ -138,6 +147,7 @@ type ToElm
     | RecordingStarted Recorder
     | Recorded Attachment
     | RecordingError String
+    | ContextMeasured Context
 
 
 {-| `theme` is what the user last chose, if anything.
@@ -309,6 +319,11 @@ toElm =
                 (TsDecode.field "url" TsDecode.string)
           )
         , ( "RecordingError", TsDecode.map RecordingError messageField )
+        , ( "ContextMeasured"
+          , TsDecode.map2 (\used window -> ContextMeasured { used = used, window = window })
+                (TsDecode.field "used" TsDecode.float)
+                (TsDecode.field "window" TsDecode.float)
+          )
         ]
 
 

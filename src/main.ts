@@ -138,6 +138,7 @@ app.ports.interopFromElm.subscribe((msg) => {
           msg.data.instructions,
           msg.data.messages,
           controller(msg.data.controller).signal,
+          (context) => send({ tag: "ContextMeasured", ...context }),
         )
         .then(
           (text) => send({ tag: "Generated", text }),
@@ -151,6 +152,7 @@ app.ports.interopFromElm.subscribe((msg) => {
           msg.data.messages,
           controller(msg.data.controller).signal,
           (text) => send({ tag: "Chunk", text }),
+          (context) => send({ tag: "ContextMeasured", ...context }),
         )
         .then(
           () => send({ tag: "StreamEnded" }),
