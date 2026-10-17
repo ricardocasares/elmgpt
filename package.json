@@ -8,6 +8,9 @@
     "preview": "vite preview",
     "types": "elm-ts-interop --output src/Main.elm.d.ts"
   },
+  "trustedDependencies": [
+    "elm"
+  ],
   "devDependencies": {
     "@tailwindcss/vite": "4.3.3",
     "elm": "^0.19.3-0",
