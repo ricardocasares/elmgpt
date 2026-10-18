@@ -46,7 +46,7 @@ main =
 -}
 instructions : String
 instructions =
-    "You are a weather assistant."
+    "You are a general assistant. You have access to multiple tools. Use and combine tools to satisfy user requirements."
 
 
 
