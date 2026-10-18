@@ -1196,7 +1196,7 @@ viewHeader model =
 viewWelcome : Model -> Html Msg
 viewWelcome model =
     div [ class "flex min-h-0 flex-1 flex-col items-center justify-center gap-6 overflow-y-auto px-4 pb-[12vh]" ]
-        [ p [ class "text-center text-2xl font-normal sm:text-[1.75rem]" ] [ text "Hey there. Ready to check the sky?" ]
+        [ p [ class "text-center text-2xl font-normal sm:text-[1.75rem]" ] [ text "Hey there, ready for the next big thing?" ]
         , div [ class "flex w-full max-w-3xl flex-col gap-4" ]
             [ viewComposer model
             , viewStatus model.status
