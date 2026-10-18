@@ -1586,17 +1586,20 @@ viewTool isOpen key call =
                     [ span [ class "text-destructive" ] [ text message ] ]
             )
         |> Item.actions
-            ([ case call.state of
-                Calling ->
-                    Spinner.view [ class "size-4 text-muted-foreground" ]
+            (let
+                statusIcon =
+                    case call.state of
+                        Calling ->
+                            Spinner.view [ class "size-4 text-muted-foreground" ]
 
-                Succeeded _ ->
-                    span [ class "text-muted-foreground" ] [ Phosphor.checkCircle Regular |> Phosphor.toHtml [] ]
+                        Succeeded _ ->
+                            span [ class "text-muted-foreground" ] [ Phosphor.checkCircle Regular |> Phosphor.toHtml [] ]
 
-                Errored _ ->
-                    span [ class "text-destructive" ] [ Phosphor.warningCircle Regular |> Phosphor.toHtml [] ]
-             ]
-                ++ (if hasInput || succeeded || failed then
+                        Errored _ ->
+                            span [ class "text-destructive" ] [ Phosphor.warningCircle Regular |> Phosphor.toHtml [] ]
+             in
+             statusIcon
+                :: (if hasInput || succeeded || failed then
                         [ toggleButton key isOpen "Show details" "Hide details" ]
 
                     else
