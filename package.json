@@ -15,7 +15,7 @@
     "@tailwindcss/vite": "4.3.3",
     "elm": "^0.19.3-0",
     "elm-ts-interop": "^0.0.8",
-    "tailwindcss": "4.3.3",
+    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vite-plugin-elm": "^3.0.1"
