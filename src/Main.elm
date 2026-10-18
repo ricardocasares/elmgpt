@@ -2,26 +2,27 @@ module Main exposing (Model, Msg, main)
 
 import Browser
 import Browser.Dom
+import File exposing (File)
+import File.Select
 import Html exposing (Attribute, Html, a, aside, audio, div, h1, header, img, main_, nav, p, span, text)
 import Html.Attributes exposing (alt, attribute, class, controls, disabled, href, name, placeholder, rel, src, target, type_, value)
 import Html.Events exposing (onClick, onInput, preventDefaultOn)
-import File exposing (File)
-import File.Select
 import InteropDefinitions as Interop exposing (AbortController, Attachment, Context, Message, Recorder, Role(..), Theme)
 import InteropPorts
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Markdown.Parser
 import Markdown.Renderer
-import Svg
-import Svg.Attributes as SvgA
 import Phosphor exposing (IconWeight(..))
 import Process
+import Set exposing (Set)
+import Svg
+import Svg.Attributes as SvgA
 import Task
 import UI.Alert as Alert
 import UI.Attachment as AttachmentView
-import UI.DropdownMenu as DropdownMenu
 import UI.Button as Button
+import UI.DropdownMenu as DropdownMenu
 import UI.InputGroup as InputGroup
 import UI.Item as Item
 import UI.MessageScroller as MessageScroller
@@ -58,7 +59,7 @@ type alias Model =
     , status : Status
     , conversation : Int
     , nextConversation : Int
-    , messages : List Message
+    , messages : List Turn
     , compacted : Int
     , compactionDue : Bool
     , draft : String
@@ -72,6 +73,7 @@ type alias Model =
     , edges : { start : Bool, end : Bool }
     , sidebarOpen : Bool
     , recents : List Conversation
+    , expanded : Set String
     }
 
 
@@ -79,7 +81,7 @@ type alias Model =
 -}
 type alias Conversation =
     { id : Int
-    , messages : List Message
+    , messages : List Turn
     , compacted : Int
     , context : Maybe Context
     }
@@ -119,9 +121,185 @@ type Request
 
 type alias Reply =
     { controller : AbortController
-    , text : String
+    , parts : List Part
     , stopping : Bool
     }
+
+
+{-| A piece of a reply, in the order the model produced it.
+-}
+type Part
+    = Text String
+    | Reasoning { id : String, text : String, done : Bool }
+    | Tool ToolCall
+
+
+{-| A call the model made to a tool. `input` waits for the call to be parsed.
+-}
+type alias ToolCall =
+    { id : String
+    , name : String
+    , input : Maybe Decode.Value
+    , state : ToolState
+    }
+
+
+{-| Where a tool call is. `Errored` is a call that could not be parsed or run, with the reason.
+-}
+type ToolState
+    = Calling
+    | Succeeded Decode.Value
+    | Errored String
+
+
+{-| A turn of the conversation as the app holds it: the message the model sees, and the parts of a
+reply (reasoning and tool calls) that are shown but not sent back.
+-}
+type alias Turn =
+    { role : Role
+    , content : String
+    , attachments : List Attachment
+    , parts : List Part
+    }
+
+
+{-| The message the model is given for a turn.
+-}
+toMessage : Turn -> Message
+toMessage turn =
+    { role = turn.role, content = turn.content, attachments = turn.attachments }
+
+
+{-| What the model said, without the reasoning and tool calls. Text before and after a part that
+interrupted it are separate paragraphs.
+-}
+replyText : List Part -> String
+replyText parts =
+    parts
+        |> List.filterMap
+            (\part ->
+                case part of
+                    Text text ->
+                        Just text
+
+                    _ ->
+                        Nothing
+            )
+        |> String.join "\n\n"
+
+
+isText : Part -> Bool
+isText part =
+    case part of
+        Text _ ->
+            True
+
+        _ ->
+            False
+
+
+{-| A text chunk goes on the text it continues, or starts a new one.
+-}
+appendText : String -> List Part -> List Part
+appendText chunk parts =
+    case List.reverse parts of
+        (Text existing) :: before ->
+            List.reverse (Text (existing ++ chunk) :: before)
+
+        _ ->
+            parts ++ [ Text chunk ]
+
+
+{-| A reasoning chunk goes on the reasoning it continues, if that is the last part and still going.
+-}
+appendReasoning : String -> String -> List Part -> List Part
+appendReasoning id chunk parts =
+    case List.reverse parts of
+        (Reasoning reasoning) :: before ->
+            if reasoning.id == id && not reasoning.done then
+                List.reverse (Reasoning { reasoning | text = reasoning.text ++ chunk } :: before)
+
+            else
+                parts ++ [ Reasoning { id = id, text = chunk, done = False } ]
+
+        _ ->
+            parts ++ [ Reasoning { id = id, text = chunk, done = False } ]
+
+
+endReasoning : String -> List Part -> List Part
+endReasoning id =
+    List.map
+        (\part ->
+            case part of
+                Reasoning reasoning ->
+                    if reasoning.id == id then
+                        Reasoning { reasoning | done = True }
+
+                    else
+                        part
+
+                _ ->
+                    part
+        )
+
+
+{-| Changes the tool call with this id, or adds it first, since an event can come for a call that was
+never started.
+-}
+upsertTool : String -> String -> (ToolCall -> ToolCall) -> List Part -> List Part
+upsertTool id name change parts =
+    if List.any (isTool id) parts then
+        List.map
+            (\part ->
+                case part of
+                    Tool call ->
+                        if call.id == id then
+                            Tool (change call)
+
+                        else
+                            part
+
+                    _ ->
+                        part
+            )
+            parts
+
+    else
+        parts ++ [ Tool (change { id = id, name = name, input = Nothing, state = Calling }) ]
+
+
+isTool : String -> Part -> Bool
+isTool id part =
+    case part of
+        Tool call ->
+            call.id == id
+
+        _ ->
+            False
+
+
+{-| A reply that ended can no longer be going on: its reasoning is done, and a call that never got
+an answer was interrupted.
+-}
+settle : List Part -> List Part
+settle =
+    List.map
+        (\part ->
+            case part of
+                Reasoning reasoning ->
+                    Reasoning { reasoning | done = True }
+
+                Tool call ->
+                    case call.state of
+                        Calling ->
+                            Tool { call | state = Errored "Interrupted" }
+
+                        _ ->
+                            part
+
+                Text _ ->
+                    part
+        )
 
 
 init : Decode.Value -> ( Model, Cmd Msg )
@@ -150,6 +328,7 @@ init flags =
       , edges = { start = False, end = False }
       , sidebarOpen = True
       , recents = []
+      , expanded = Set.empty
       }
     , InteropPorts.fromElm Interop.CheckAvailability
     )
@@ -170,7 +349,8 @@ isDark model =
 
 canSend : Model -> Bool
 canSend model =
-    model.status == Ready
+    model.status
+        == Ready
         && not (isRunning model.request)
         && (model.recording == NotRecording)
         && not (String.isEmpty (String.trim model.draft) && List.isEmpty model.attachments)
@@ -210,6 +390,7 @@ type Msg
     | NoticeDismissed
     | CopyClicked Int String
     | CopiedReset
+    | PartToggled String
     | Scrolled { start : Bool, end : Bool }
     | ScrollToEndClicked
     | Measured (Result Browser.Dom.Error Browser.Dom.Viewport)
@@ -238,7 +419,7 @@ update msg model =
         SendClicked ->
             if canSend model then
                 ( { model
-                    | messages = model.messages ++ [ { role = User, content = String.trim model.draft, attachments = model.attachments } ]
+                    | messages = model.messages ++ [ { role = User, content = String.trim model.draft, attachments = model.attachments, parts = [] } ]
                     , draft = ""
                     , attachments = []
                     , request = Starting
@@ -367,6 +548,18 @@ update msg model =
         CopiedReset ->
             ( { model | copied = Nothing }, Cmd.none )
 
+        PartToggled key ->
+            ( { model
+                | expanded =
+                    if Set.member key model.expanded then
+                        Set.remove key model.expanded
+
+                    else
+                        Set.insert key model.expanded
+              }
+            , Cmd.none
+            )
+
         Scrolled edges ->
             ( { model | edges = edges }, Cmd.none )
 
@@ -455,7 +648,7 @@ fromInterop event model =
                             , controller = controller
                             }
                     in
-                    ( { model | request = Running { controller = controller, text = "", stopping = False } }
+                    ( { model | request = Running { controller = controller, parts = [], stopping = False } }
                     , InteropPorts.fromElm (Interop.Stream request)
                     )
 
@@ -463,12 +656,25 @@ fromInterop event model =
                     ( model, Cmd.none )
 
         Interop.Chunk chunk ->
-            case model.request of
-                Running reply ->
-                    ( { model | request = Running { reply | text = reply.text ++ chunk } }, measure )
+            updateParts (appendText chunk) model
 
-                _ ->
-                    ( model, Cmd.none )
+        Interop.ReasoningChunk reasoning ->
+            updateParts (appendReasoning reasoning.id reasoning.text) model
+
+        Interop.ReasoningEnded id ->
+            updateParts (endReasoning id) model
+
+        Interop.ToolStarted tool ->
+            updateParts (upsertTool tool.id tool.name identity) model
+
+        Interop.ToolCalled tool ->
+            updateParts (upsertTool tool.id tool.name (\call -> { call | input = Just tool.input })) model
+
+        Interop.ToolSucceeded tool ->
+            updateParts (upsertTool tool.id tool.name (\call -> { call | state = Succeeded tool.output })) model
+
+        Interop.ToolFailed tool ->
+            updateParts (upsertTool tool.id tool.name (\call -> { call | state = Errored tool.error })) model
 
         Interop.Generated text ->
             finish { text = Just text, error = Nothing } model
@@ -528,7 +734,7 @@ fromInterop event model =
                                         ++ " messages of the conversation. Try a shorter message, fewer attachments or a new chat."
                                     )
                             }
-                            { model | request = Running { reply | text = "" } }
+                            { model | request = Running { reply | parts = [] } }
 
                 _ ->
                     ( model, Cmd.none )
@@ -539,8 +745,20 @@ fromInterop event model =
             )
 
 
-{-| Ends the reply in progress. Its text, or the whole text of a generated reply, becomes the
-assistant's turn, unless there is none. An error is shown, unless the reply was being stopped: then
+{-| A reply grew: its parts change, and the transcript follows the end if the reader was there.
+-}
+updateParts : (List Part -> List Part) -> Model -> ( Model, Cmd Msg )
+updateParts change model =
+    case model.request of
+        Running reply ->
+            ( { model | request = Running { reply | parts = change reply.parts } }, measure )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+{-| Ends the reply in progress. Its parts, or the whole text of a generated reply, become the
+assistant's turn, unless there are none. An error is shown, unless the reply was being stopped: then
 it is the abort, which is expected.
 -}
 finish : { text : Maybe String, error : Maybe String } -> Model -> ( Model, Cmd Msg )
@@ -549,17 +767,26 @@ finish outcome model =
         Running reply ->
             let
                 content =
-                    Maybe.withDefault reply.text outcome.text
+                    Maybe.withDefault (replyText reply.parts) outcome.text
+
+                -- A generated reply has its text whole, in place of any text that streamed.
+                parts =
+                    case outcome.text of
+                        Just generated ->
+                            settle (List.filter (isText >> not) reply.parts) ++ [ Text generated ]
+
+                        Nothing ->
+                            settle reply.parts
 
                 finished =
                     { model
                         | request = Idle
                         , messages =
-                            if String.isEmpty content then
+                            if String.isEmpty content && List.isEmpty parts then
                                 model.messages
 
                             else
-                                model.messages ++ [ { role = Assistant, content = content, attachments = [] } ]
+                                model.messages ++ [ { role = Assistant, content = content, attachments = [], parts = parts } ]
                         , notice =
                             case ( outcome.error, reply.stopping ) of
                                 ( Just message, False ) ->
@@ -619,6 +846,7 @@ compactAt =
 inContext : Model -> List Message
 inContext model =
     List.drop model.compacted model.messages
+        |> List.map toMessage
 
 
 {-| Leaves all but the last `keepInContext` messages out of the context. They stay in the transcript,
@@ -647,7 +875,7 @@ compact model =
 {-| An archived message keeps its attachments' names and types, not their data, which would soon
 fill localStorage.
 -}
-encodeArchived : Message -> Encode.Value
+encodeArchived : Turn -> Encode.Value
 encodeArchived message =
     Encode.object
         [ ( "role"
@@ -695,7 +923,13 @@ open conversation model =
         , messages = conversation.messages
         , compacted = conversation.compacted
         , context = conversation.context
-        , draft = "", attachments = [], notice = Nothing, holding = False, edges = { start = False, end = False } }
+        , draft = ""
+        , attachments = []
+        , notice = Nothing
+        , holding = False
+        , edges = { start = False, end = False }
+        , expanded = Set.empty
+    }
 
 
 {-| A recent conversation is named after its first question.
@@ -1074,7 +1308,7 @@ viewTranscript model =
         |> MessageScroller.padding "calc(var(--spacing) * 6)"
         |> MessageScroller.busy (isRunning model.request)
         |> MessageScroller.items [ class "mx-auto w-full max-w-3xl gap-6 px-4" ]
-            (List.concat (List.indexedMap (viewTurn model) model.messages) ++ viewReply model.request)
+            (List.concat (List.indexedMap (viewTurn model) model.messages) ++ viewReply model.expanded model.request)
         |> (if model.holding then
                 MessageScroller.holdTurn
 
@@ -1089,13 +1323,13 @@ viewTranscript model =
 
 {-| A message, after the line where the compacted part of the conversation ends.
 -}
-viewTurn : Model -> Int -> Message -> List (MessageScroller.Item Msg)
+viewTurn : Model -> Int -> Turn -> List (MessageScroller.Item Msg)
 viewTurn model index message =
     if index == model.compacted && index > 0 then
-        [ viewCompacted, viewMessage model.copied index message ]
+        [ viewCompacted, viewMessage model.copied model.expanded index message ]
 
     else
-        [ viewMessage model.copied index message ]
+        [ viewMessage model.copied model.expanded index message ]
 
 
 viewCompacted : MessageScroller.Item Msg
@@ -1108,8 +1342,8 @@ viewCompacted =
         ]
 
 
-viewMessage : Maybe Int -> Int -> Message -> MessageScroller.Item Msg
-viewMessage copied index message =
+viewMessage : Maybe Int -> Set String -> Int -> Turn -> MessageScroller.Item Msg
+viewMessage copied expanded index message =
     let
         id =
             "message-" ++ String.fromInt index
@@ -1133,25 +1367,26 @@ viewMessage copied index message =
         Assistant ->
             MessageScroller.item id
                 [ class "flex flex-col items-start gap-1" ]
-                [ viewMarkdown message.content
-                , Button.new
-                    |> Button.icon
-                        (if copied == Just index then
-                            Phosphor.check Regular |> Phosphor.toHtml []
+                (viewParts expanded ("message-" ++ String.fromInt index ++ "-") message.parts
+                    ++ [ Button.new
+                            |> Button.icon
+                                (if copied == Just index then
+                                    Phosphor.check Regular |> Phosphor.toHtml []
 
-                         else
-                            Phosphor.copy Regular |> Phosphor.toHtml []
-                        )
-                    |> Button.label
-                        (if copied == Just index then
-                            "Copied"
+                                 else
+                                    Phosphor.copy Regular |> Phosphor.toHtml []
+                                )
+                            |> Button.label
+                                (if copied == Just index then
+                                    "Copied"
 
-                         else
-                            "Copy"
-                        )
-                    |> Button.ghost
-                    |> Button.toHtml [ onClick (CopyClicked index message.content), class "-ms-2 text-muted-foreground" ]
-                ]
+                                 else
+                                    "Copy"
+                                )
+                            |> Button.ghost
+                            |> Button.toHtml [ onClick (CopyClicked index message.content), class "-ms-2 text-muted-foreground" ]
+                       ]
+                )
 
 
 {-| A reply, formatted from its markdown. A reply still coming in can stop in the middle of a block,
@@ -1201,10 +1436,10 @@ viewSentAttachment attachment =
         audio [ src attachment.url, controls True, class "w-72 max-w-[70%]" ] []
 
 
-{-| The reply as it comes in, under the turn it answers. A pulsing dot stands in until the first words.
+{-| The reply as it comes in, under the turn it answers. A pulsing dot stands in until the first part.
 -}
-viewReply : Request -> List (MessageScroller.Item Msg)
-viewReply request =
+viewReply : Set String -> Request -> List (MessageScroller.Item Msg)
+viewReply expanded request =
     case request of
         Idle ->
             []
@@ -1215,13 +1450,264 @@ viewReply request =
         Running reply ->
             [ MessageScroller.item "reply"
                 []
-                [ if String.isEmpty reply.text then
-                    thinking
+                (if List.isEmpty reply.parts then
+                    [ thinking ]
 
-                  else
-                    viewMarkdown reply.text
-                ]
+                 else
+                    viewParts expanded "reply-" reply.parts
+                )
             ]
+
+
+{-| The parts of a reply, in order. Each part that can be opened is keyed by the prefix and its id, in
+`expanded`.
+-}
+viewParts : Set String -> String -> List Part -> List (Html Msg)
+viewParts expanded keyPrefix parts =
+    List.map
+        (\part ->
+            case part of
+                Text source ->
+                    viewMarkdown source
+
+                Reasoning reasoning ->
+                    viewReasoning (Set.member (keyPrefix ++ reasoning.id) expanded) (keyPrefix ++ reasoning.id) reasoning
+
+                Tool call ->
+                    viewTool (Set.member (keyPrefix ++ call.id) expanded) (keyPrefix ++ call.id) call
+        )
+        parts
+
+
+{-| What the model thought, as a line that opens to the whole of it.
+-}
+viewReasoning : Bool -> String -> { id : String, text : String, done : Bool } -> Html Msg
+viewReasoning isOpen key reasoning =
+    Item.new
+        |> Item.icon (Phosphor.brain Regular |> Phosphor.toHtml [])
+        |> Item.title
+            [ text
+                (if reasoning.done then
+                    "Reasoning"
+
+                 else
+                    "Thinking…"
+                )
+            ]
+        |> (if isOpen || String.isEmpty reasoning.text then
+                identity
+
+            else
+                Item.description [ text reasoning.text ]
+           )
+        |> Item.actions
+            ((if reasoning.done then
+                []
+
+              else
+                [ Spinner.view [ class "size-4 text-muted-foreground" ] ]
+             )
+                ++ (if String.isEmpty reasoning.text then
+                        []
+
+                    else
+                        [ toggleButton key isOpen "Show reasoning" "Hide reasoning" ]
+                   )
+            )
+        |> (if isOpen then
+                Item.footer [ div [ class "w-full text-sm text-muted-foreground" ] [ viewMarkdown reasoning.text ] ]
+
+            else
+                identity
+           )
+        |> Item.muted
+        |> Item.small
+        |> Item.toHtml [ class "my-1" ]
+
+
+{-| A call to a tool, with how it went and, when opened, what went in and came out.
+-}
+viewTool : Bool -> String -> ToolCall -> Html Msg
+viewTool isOpen key call =
+    let
+        geolocation =
+            call.name == "geolocation"
+
+        succeeded =
+            case call.state of
+                Succeeded _ ->
+                    True
+
+                _ ->
+                    False
+
+        hasInput =
+            case call.input of
+                Just _ ->
+                    True
+
+                Nothing ->
+                    False
+
+        failed =
+            case call.state of
+                Errored _ ->
+                    True
+
+                _ ->
+                    False
+    in
+    Item.new
+        |> Item.icon (toolGlyph call.name)
+        |> Item.title [ text (toolLabel call.name) ]
+        |> Item.description
+            (case call.state of
+                Calling ->
+                    [ text
+                        (if geolocation then
+                            "Asking the browser…"
+
+                         else
+                            "Running…"
+                        )
+                    ]
+
+                Succeeded _ ->
+                    [ text
+                        (if geolocation then
+                            "Found your location"
+
+                         else
+                            "Done"
+                        )
+                    ]
+
+                Errored message ->
+                    [ span [ class "text-destructive" ] [ text message ] ]
+            )
+        |> Item.actions
+            ([ case call.state of
+                Calling ->
+                    Spinner.view [ class "size-4 text-muted-foreground" ]
+
+                Succeeded _ ->
+                    span [ class "text-muted-foreground" ] [ Phosphor.checkCircle Regular |> Phosphor.toHtml [] ]
+
+                Errored _ ->
+                    span [ class "text-destructive" ] [ Phosphor.warningCircle Regular |> Phosphor.toHtml [] ]
+             ]
+                ++ (if hasInput || succeeded || failed then
+                        [ toggleButton key isOpen "Show details" "Hide details" ]
+
+                    else
+                        []
+                   )
+            )
+        |> (if isOpen then
+                Item.footer
+                    [ div [ class "flex w-full flex-col gap-2" ]
+                        (List.concat
+                            [ case call.input of
+                                Just input ->
+                                    viewJson "Input" input
+
+                                Nothing ->
+                                    []
+                            , case call.state of
+                                Succeeded output ->
+                                    viewJson "Output" output
+
+                                Errored message ->
+                                    viewDetail "Error" message
+
+                                Calling ->
+                                    []
+                            ]
+                        )
+                    ]
+
+            else
+                identity
+           )
+        |> Item.outline
+        |> Item.small
+        |> Item.toHtml
+            [ class "my-1"
+            , class
+                (if failed then
+                    "border-destructive/40!"
+
+                 else
+                    ""
+                )
+            ]
+
+
+viewJson : String -> Decode.Value -> List (Html msg)
+viewJson caption value =
+    viewDetail caption (Encode.encode 2 value)
+
+
+{-| A captioned block of a tool call's details, as it is.
+-}
+viewDetail : String -> String -> List (Html msg)
+viewDetail caption content =
+    [ span [ class "text-xs font-medium text-muted-foreground" ] [ text caption ]
+    , Html.pre [ class "overflow-x-auto rounded-md bg-muted p-2 text-xs font-mono whitespace-pre-wrap" ] [ text content ]
+    ]
+
+
+{-| The caret that opens or closes a part.
+-}
+toggleButton : String -> Bool -> String -> String -> Html Msg
+toggleButton key isOpen showLabel hideLabel =
+    Button.new
+        |> Button.icon
+            (if isOpen then
+                Phosphor.caretUp Regular |> Phosphor.toHtml []
+
+             else
+                Phosphor.caretDown Regular |> Phosphor.toHtml []
+            )
+        |> Button.label
+            (if isOpen then
+                hideLabel
+
+             else
+                showLabel
+            )
+        |> Button.ghost
+        |> Button.extraSmall
+        |> Button.toHtml
+            [ onClick (PartToggled key)
+            , attribute "aria-expanded"
+                (if isOpen then
+                    "true"
+
+                 else
+                    "false"
+                )
+            ]
+
+
+toolGlyph : String -> Html msg
+toolGlyph name =
+    case name of
+        "geolocation" ->
+            Phosphor.mapPin Regular |> Phosphor.toHtml []
+
+        _ ->
+            Phosphor.wrench Regular |> Phosphor.toHtml []
+
+
+toolLabel : String -> String
+toolLabel name =
+    case name of
+        "geolocation" ->
+            "Your location"
+
+        _ ->
+            name
 
 
 thinking : Html msg

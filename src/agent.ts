@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ToolLoopAgent, isStepCount, tool, type ModelMessage } from "ai";
+import { ToolLoopAgent, isStepCount, tool, type ModelMessage, type TextStreamPart } from "ai";
 import {
     browserAI,
     doesBrowserSupportBrowserAI,
@@ -21,18 +21,18 @@ const toModelMessage = ({ role, content, attachments }: ChatMessage): ModelMessa
     role === "assistant"
         ? { role, content }
         : {
-              role,
-              content: [
-                  ...(content ? [{ type: "text" as const, text: content }] : []),
-                  ...attachments.map(({ name, mediaType, url }) => ({
-                      type: "file" as const,
-                      filename: name,
-                      mediaType,
-                      // The base64 after the comma of a `data:` URL.
-                      data: url.slice(url.indexOf(",") + 1),
-                  })),
-              ],
-          };
+            role,
+            content: [
+                ...(content ? [{ type: "text" as const, text: content }] : []),
+                ...attachments.map(({ name, mediaType, url }) => ({
+                    type: "file" as const,
+                    filename: name,
+                    mediaType,
+                    // The base64 after the comma of a `data:` URL.
+                    data: url.slice(url.indexOf(",") + 1),
+                })),
+            ],
+        };
 
 /** How many tokens of the model's context window the conversation takes. */
 export type Context = { used: number; window: number };
@@ -78,6 +78,9 @@ const tools = {
     }),
 };
 
+/** One part of a streamed reply: text, reasoning, or a step of a tool call. */
+export type StreamPart = TextStreamPart<typeof tools>;
+
 /**
  * The browser's built-in model behind the AI SDK. Every method is a single call with no state of
  * its own: Elm decides when to check, download, generate and abort, and holds the conversation.
@@ -91,6 +94,7 @@ export function init(settings: BrowserAIChatSettings) {
 
     const agent = (instructions: string) => {
         const model = browserAI("text", settings);
+
         return {
             agent: new ToolLoopAgent({
                 model,
@@ -143,7 +147,7 @@ export function init(settings: BrowserAIChatSettings) {
             instructions: string,
             messages: ChatMessage[],
             signal: AbortSignal,
-            onChunk: (text: string) => void,
+            onPart: (part: StreamPart) => void,
             onContext: (context: Context) => void,
         ): Promise<void> => {
             const reply = agent(instructions);
@@ -153,13 +157,9 @@ export function init(settings: BrowserAIChatSettings) {
                     abortSignal: signal,
                 });
                 for await (const part of result.stream) {
-                    switch (part.type) {
-                        case "text-delta":
-                            onChunk(part.text);
-                            break;
-                        case "error":
-                            throw part.error;
-                    }
+                    // A failed stream is an error, not a part for the UI.
+                    if (part.type === "error") throw part.error;
+                    onPart(part);
                 }
                 reply.measure(onContext);
             } catch (error) {

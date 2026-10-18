@@ -127,6 +127,12 @@ type FromElm
     | StopRecording Recorder
 
 
+{-| `ToElm` is every result and event TypeScript sends. Among them, `Chunk` is the text of a streamed
+reply, and `ReasoningChunk` through `ToolFailed` are the other parts of it. `id` is the AI SDK's id for
+the part: a reasoning id, or the id of the tool call. A tool goes `ToolStarted`, `ToolCalled`, then
+`ToolSucceeded` or `ToolFailed`. `ToolFailed` can also come straight after `ToolStarted`, when the
+model's call could not be parsed. Elm pretty-prints `input` and `output` itself.
+-}
 type ToElm
     = SystemThemeChanged Bool
     | LocalStorageRead { key : String, value : Maybe String }
@@ -141,6 +147,12 @@ type ToElm
     | Generated String
     | GenerationError String
     | Chunk String
+    | ReasoningChunk { id : String, text : String }
+    | ReasoningEnded String
+    | ToolStarted { id : String, name : String }
+    | ToolCalled { id : String, name : String, input : Decode.Value }
+    | ToolSucceeded { id : String, name : String, output : Decode.Value }
+    | ToolFailed { id : String, name : String, error : String }
     | StreamEnded
     | StreamError String
     | ContextOverflow
@@ -311,6 +323,35 @@ toElm =
         , ( "Generated", TsDecode.map Generated textField )
         , ( "GenerationError", TsDecode.map GenerationError messageField )
         , ( "Chunk", TsDecode.map Chunk textField )
+        , ( "ReasoningChunk"
+          , TsDecode.map2 (\id text -> ReasoningChunk { id = id, text = text })
+                idField
+                textField
+          )
+        , ( "ReasoningEnded", TsDecode.map ReasoningEnded idField )
+        , ( "ToolStarted"
+          , TsDecode.map2 (\id name -> ToolStarted { id = id, name = name })
+                idField
+                nameField
+          )
+        , ( "ToolCalled"
+          , TsDecode.map3 (\id name input -> ToolCalled { id = id, name = name, input = input })
+                idField
+                nameField
+                (TsDecode.field "input" TsDecode.value)
+          )
+        , ( "ToolSucceeded"
+          , TsDecode.map3 (\id name output -> ToolSucceeded { id = id, name = name, output = output })
+                idField
+                nameField
+                (TsDecode.field "output" TsDecode.value)
+          )
+        , ( "ToolFailed"
+          , TsDecode.map3 (\id name error -> ToolFailed { id = id, name = name, error = error })
+                idField
+                nameField
+                (TsDecode.field "error" TsDecode.string)
+          )
         , ( "StreamEnded", TsDecode.succeed StreamEnded )
         , ( "StreamError", TsDecode.map StreamError messageField )
         , ( "ContextOverflow", TsDecode.succeed ContextOverflow )
@@ -339,6 +380,16 @@ messageField =
 textField : Decoder String
 textField =
     TsDecode.field "text" TsDecode.string
+
+
+idField : Decoder String
+idField =
+    TsDecode.field "id" TsDecode.string
+
+
+nameField : Decoder String
+nameField =
+    TsDecode.field "name" TsDecode.string
 
 
 availabilityDecoder : Decoder Availability

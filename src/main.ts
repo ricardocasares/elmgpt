@@ -1,4 +1,4 @@
-import { init, isInputTooLarge } from "./agent";
+import { init, isInputTooLarge, type StreamPart } from "./agent";
 import { Elm, type Flags, type JsonValue, type ToElm } from "./Main.elm";
 
 //-- FLAGS
@@ -29,6 +29,71 @@ const err = (e: unknown) => e instanceof Error ? e.message : String(e);
 //-- AGENT
 
 const ai = init({ onContextOverflow: () => send({ tag: "ContextOverflow" }) });
+
+// Elm shows a reply's text, its reasoning and its tool calls. The rest of the stream (step
+// boundaries, finish, abort, sources, files) carries nothing the UI needs.
+const forward = (part: StreamPart) => {
+  switch (part.type) {
+    case "text-delta":
+      return send({ tag: "Chunk", text: part.text });
+
+    case "reasoning-delta":
+      return send({ tag: "ReasoningChunk", id: part.id, text: part.text });
+
+    case "reasoning-end":
+      return send({ tag: "ReasoningEnded", id: part.id });
+
+    case "tool-input-start":
+      return send({ tag: "ToolStarted", id: part.id, name: part.toolName });
+
+    // An invalid call still shows what the model tried, before why it was refused.
+    case "tool-call":
+      send({
+        tag: "ToolCalled",
+        id: part.toolCallId,
+        name: part.toolName,
+        input: part.input as JsonValue,
+      });
+      return part.invalid
+        ? send({
+            tag: "ToolFailed",
+            id: part.toolCallId,
+            name: part.toolName,
+            error:
+              part.error === undefined
+                ? "The model's call could not be parsed."
+                : err(part.error),
+          })
+        : undefined;
+
+    case "tool-result":
+      return send({
+        tag: "ToolSucceeded",
+        id: part.toolCallId,
+        name: part.toolName,
+        output: part.output as JsonValue,
+      });
+
+    case "tool-error":
+      return send({
+        tag: "ToolFailed",
+        id: part.toolCallId,
+        name: part.toolName,
+        error: err(part.error),
+      });
+
+    case "tool-output-denied":
+      return send({
+        tag: "ToolFailed",
+        id: part.toolCallId,
+        name: part.toolName,
+        error: "The call was denied.",
+      });
+
+    default:
+      return;
+  }
+};
 
 // An AbortController or a MediaRecorder crosses the ports as an opaque value: Elm holds it and hands
 // it back as it came, so these casts only name what it is.
@@ -157,7 +222,7 @@ app.ports.interopFromElm.subscribe((msg) => {
           msg.data.instructions,
           msg.data.messages,
           controller(msg.data.controller).signal,
-          (text) => send({ tag: "Chunk", text }),
+          forward,
           (context) => send({ tag: "ContextMeasured", ...context }),
         )
         .then(
