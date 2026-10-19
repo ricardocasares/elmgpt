@@ -1,3 +1,4 @@
+import "./UI/elmcn-dialog";
 import { init, isInputTooLarge, type StreamPart } from "./agent";
 import { Elm, type Flags, type JsonValue, type ToElm } from "./Main.elm";
 

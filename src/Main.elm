@@ -22,6 +22,7 @@ import Task
 import UI.Alert as Alert
 import UI.Attachment as AttachmentView
 import UI.Button as Button
+import UI.Drawer as Drawer
 import UI.DropdownMenu as DropdownMenu
 import UI.InputGroup as InputGroup
 import UI.Item as Item
@@ -326,7 +327,7 @@ init flags =
       , copied = Nothing
       , holding = False
       , edges = { start = False, end = False }
-      , sidebarOpen = True
+      , sidebarOpen = False
       , recents = []
       , expanded = Set.empty
       }
@@ -384,6 +385,7 @@ type Msg
     | NewChatClicked
     | RecentClicked Int
     | SidebarToggled
+    | SidebarSet Bool
     | StopClicked
     | DownloadClicked
     | RetryClicked
@@ -516,6 +518,9 @@ update msg model =
 
         SidebarToggled ->
             ( { model | sidebarOpen = not model.sidebarOpen }, Cmd.none )
+
+        SidebarSet isOpen ->
+            ( { model | sidebarOpen = isOpen }, Cmd.none )
 
         -- The reply ends with the error that aborting raises, which `finish` then keeps quiet about.
         StopClicked ->
@@ -994,11 +999,7 @@ view model =
         ]
         [ div [ class "flex h-dvh bg-background text-foreground" ]
             [ viewRail model
-            , if model.sidebarOpen then
-                viewSidebar model
-
-              else
-                text ""
+            , viewSidebar model
             , main_ [ class "relative flex min-w-0 flex-1 flex-col" ]
                 (viewHeader model
                     :: (if isEmpty model then
@@ -1103,48 +1104,55 @@ sidebarToggle model =
         |> Button.toHtml [ onClick SidebarToggled, class "text-sidebar-foreground [&_svg]:size-5!" ]
 
 
-{-| The panel beside the rail, with the conversations a new chat put aside.
+{-| The conversations a new chat put aside, in a non-modal drawer that slides over the page from the left.
 -}
 viewSidebar : Model -> Html Msg
 viewSidebar model =
-    aside [ class "my-2 hidden w-72 shrink-0 flex-col overflow-hidden rounded-2xl border bg-sidebar text-sidebar-foreground sm:flex dark:border-transparent" ]
-        [ div [ class "flex items-center justify-between px-4 pt-3 pb-2" ]
-            [ span [ class "text-lg font-medium" ] [ text "elmgpt" ]
-            , sidebarToggle model
-            ]
-        , div [ class "px-2" ]
-            [ Button.new
-                |> Button.text "New chat"
-                |> Button.startIcon (Phosphor.notePencil Regular |> Phosphor.toHtml [])
-                |> Button.ghost
-                |> Button.large
-                |> Button.toHtml [ onClick NewChatClicked, disabled (isRunning model.request), class "w-full justify-start px-3! text-[0.95rem] hover:bg-sidebar-accent! [&_svg]:size-4.5!" ]
-            ]
-        , p [ class "px-5 pt-6 pb-2 text-sm text-muted-foreground" ] [ text "Recents" ]
-        , div [ class "flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-3" ]
-            (if List.isEmpty model.recents then
-                [ p [ class "px-3 text-sm text-muted-foreground/70" ] [ text "Start a new chat to keep this one here." ] ]
+    Drawer.new
+        |> Drawer.id "sidebar"
+        |> Drawer.open model.sidebarOpen (SidebarSet False)
+        |> Drawer.left
+        |> Drawer.nonModal
+        |> Drawer.width "18rem"
+        |> Drawer.title [ text "elmgpt" ]
+        |> Drawer.content
+            [ div [ class "flex min-h-0 flex-1 flex-col pt-2" ]
+                [ div [ class "absolute top-2 right-2" ] [ sidebarToggle model ]
+                , div [ class "px-2" ]
+                    [ Button.new
+                        |> Button.text "New chat"
+                        |> Button.startIcon (Phosphor.notePencil Regular |> Phosphor.toHtml [])
+                        |> Button.ghost
+                        |> Button.large
+                        |> Button.toHtml [ onClick NewChatClicked, disabled (isRunning model.request), class "w-full justify-start px-3! text-[0.95rem] hover:bg-sidebar-accent! [&_svg]:size-4.5!" ]
+                    ]
+                , p [ class "px-5 pt-6 pb-2 text-sm text-muted-foreground" ] [ text "Recents" ]
+                , div [ class "flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-3" ]
+                    (if List.isEmpty model.recents then
+                        [ p [ class "px-3 text-sm text-muted-foreground/70" ] [ text "Start a new chat to keep this one here." ] ]
 
-             else
-                List.map
-                    (\conversation ->
-                        Html.button
-                            (type_ "button"
-                                :: onClick (RecentClicked conversation.id)
-                                :: disabled (isRunning model.request)
-                                :: Html.Attributes.title (conversationTitle conversation)
-                                :: class "w-full justify-start px-3! text-[0.95rem] font-normal hover:bg-sidebar-accent!"
-                                :: (Button.new
-                                        |> Button.ghost
-                                        |> Button.large
-                                        |> Button.toAttributes
-                                   )
+                     else
+                        List.map
+                            (\conversation ->
+                                Html.button
+                                    (type_ "button"
+                                        :: onClick (RecentClicked conversation.id)
+                                        :: disabled (isRunning model.request)
+                                        :: Html.Attributes.title (conversationTitle conversation)
+                                        :: class "w-full justify-start px-3! text-[0.95rem] font-normal hover:bg-sidebar-accent!"
+                                        :: (Button.new
+                                                |> Button.ghost
+                                                |> Button.large
+                                                |> Button.toAttributes
+                                           )
+                                    )
+                                    [ span [ class "truncate" ] [ text (conversationTitle conversation) ] ]
                             )
-                            [ span [ class "truncate" ] [ text (conversationTitle conversation) ] ]
+                            model.recents
                     )
-                    model.recents
-            )
-        ]
+                ]
+            ]
+        |> Drawer.toHtml [ class "bg-sidebar text-sidebar-foreground" ]
 
 
 themeItem : Model -> Theme -> Html Msg -> String -> DropdownMenu.Item Msg
@@ -1155,17 +1163,10 @@ themeItem model theme glyph caption =
 viewHeader : Model -> Html Msg
 viewHeader model =
     header [ class "grid grid-cols-[1fr_auto_1fr] items-center px-3 py-2.5" ]
-        [ h1
-            [ class "px-2 text-lg font-medium"
-            , class
-                (if model.sidebarOpen then
-                    "sm:invisible"
-
-                 else
-                    ""
-                )
+        [ div [ class "flex items-center gap-1" ]
+            [ div [ class "sm:hidden" ] [ sidebarToggle model ]
+            , h1 [ class "hidden px-2 text-lg font-medium sm:block" ] [ text "elmgpt" ]
             ]
-            [ text "elmgpt" ]
         , Tabs.new
             |> Tabs.id "mode"
             |> Tabs.onSelect (\_ -> NoOp)
